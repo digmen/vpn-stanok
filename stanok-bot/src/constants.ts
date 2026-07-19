@@ -9,6 +9,7 @@ export const SSH = {
 export const REMOTE = {
   INSTALL_SCRIPT: '/root/install-amneziawg.sh',
   SELLER_DIR: '/root/seller-bot',
+  SELLER_DATA_DIR: '/root/seller-bot-data', // изменяемое состояние; НЕ стирается при обновлении кода
   NODE_SETUP_URL: 'https://deb.nodesource.com/setup_22.x',
 } as const;
 

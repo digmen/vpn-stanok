@@ -24,6 +24,7 @@ export async function deploySeller(opts: DeployOpts): Promise<void> {
     password: opts.password,
     port: SSH.PORT,
     readyTimeout: SSH.READY_TIMEOUT_MS,
+    tryKeyboard: true, // многие серверы принимают пароль только через keyboard-interactive
   });
 
   try {
@@ -43,8 +44,8 @@ export async function deploySeller(opts: DeployOpts): Promise<void> {
       if (r.code !== 0) throw new Error('pm2 не установился: ' + (r.stderr || r.stdout).slice(0, 300));
     }
 
-    // 3. Заливаем код (без node_modules/.env/dist)
-    await ssh.execCommand(`rm -rf ${remoteDir} && mkdir -p ${remoteDir}`);
+    // 3. Заливаем код заново (data-папка сохраняется — там цена, статистика, конфиг владельца)
+    await ssh.execCommand(`rm -rf ${remoteDir} && mkdir -p ${remoteDir} ${REMOTE.SELLER_DATA_DIR}`);
     const uploaded = await ssh.putDirectory(SELLER_LOCAL, remoteDir, {
       recursive: true,
       concurrency: 5,
@@ -65,6 +66,7 @@ export async function deploySeller(opts: DeployOpts): Promise<void> {
       `OWNER_ID=${opts.ownerId}`,
       `STANOK_URL=${opts.stanokUrl}`,
       `PRICE_STARS=${opts.priceStars}`,
+      `DATA_DIR=${REMOTE.SELLER_DATA_DIR}`,
     ].join('\n');
     const writeEnv = await ssh.execCommand(`cat > ${remoteDir}/.env <<'ENVEOF'\n${env}\nENVEOF`);
     if (writeEnv.code !== 0) throw new Error('не удалось записать .env');

@@ -62,6 +62,14 @@ export function getNodeById(id: number): NodeRow | undefined {
   return db.prepare('SELECT * FROM nodes WHERE id = ?').get(id) as NodeRow | undefined;
 }
 
+export function getAllNodes(): NodeRow[] {
+  return db.prepare('SELECT * FROM nodes ORDER BY id DESC').all() as NodeRow[];
+}
+
+export function getReadyNodes(): NodeRow[] {
+  return db.prepare("SELECT * FROM nodes WHERE status = 'ready' ORDER BY id").all() as NodeRow[];
+}
+
 export function setNodeStatus(id: number, status: string): void {
   db.prepare("UPDATE nodes SET status = ?, updated_at = datetime('now') WHERE id = ?").run(status, id);
 }

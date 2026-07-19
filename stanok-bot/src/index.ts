@@ -1,9 +1,12 @@
 import { Bot, InlineKeyboard, session } from 'grammy';
 import { conversations, createConversation } from '@grammyjs/conversations';
 import { config } from './config.js';
-import { getNodesByUser } from './db.js';
+import { getAllNodes, getNodesByUser, getReadyNodes } from './db.js';
 import { onboarding, type MyContext } from './onboarding.js';
 import { provisionNode } from './provision.js';
+import { notifyAdmins } from './admin.js';
+import { checkNodeAlive } from './ssh.js';
+import { decrypt } from './crypto.js';
 
 const bot = new Bot<MyContext>(config.botToken);
 
@@ -98,6 +101,23 @@ bot.command('help', async (ctx) => {
   await ctx.reply('/start — начать\n/status — статус твоих серверов');
 });
 
+// Мониторинг всех узлов (только админ): статус + живая проверка доступности
+bot.command('nodes', async (ctx) => {
+  if (!config.adminIds.includes(ctx.from?.id ?? -1)) return;
+  const nodes = getAllNodes();
+  if (nodes.length === 0) {
+    await ctx.reply('Узлов пока нет.');
+    return;
+  }
+  const lines = await Promise.all(
+    nodes.map(async (n) => {
+      const up = n.status === 'ready' ? await checkNodeAlive(n.server_ip, decrypt(n.root_password_enc)) : false;
+      return `#${n.id} ${up ? '🟢' : '🔴'} ${n.server_ip} · ${n.status} · @${n.tg_username ?? '—'}`;
+    }),
+  );
+  await ctx.reply('Узлы:\n' + lines.join('\n'));
+});
+
 // Админ присылает медиа → бот возвращает file_id (чтобы вставить в .env как видео-инструкцию).
 bot.on(['message:video', 'message:animation', 'message:document', 'message:photo'], async (ctx) => {
   if (!config.adminIds.includes(ctx.from?.id ?? -1)) return;
@@ -117,6 +137,22 @@ bot.catch((err) => console.error('Ошибка бота:', err));
 // Аккуратная остановка
 process.once('SIGINT', () => bot.stop());
 process.once('SIGTERM', () => bot.stop());
+
+// Мониторинг узлов: раз в 30 мин проверяем доступность, алертим админам об изменениях
+const offlineNodes = new Set<number>();
+async function monitorNodes(): Promise<void> {
+  for (const n of getReadyNodes()) {
+    const up = await checkNodeAlive(n.server_ip, decrypt(n.root_password_enc));
+    if (!up && !offlineNodes.has(n.id)) {
+      offlineNodes.add(n.id);
+      await notifyAdmins(bot.api, `🔴 Узел #${n.id} (${n.server_ip}, @${n.tg_username ?? '—'}) недоступен.`);
+    } else if (up && offlineNodes.has(n.id)) {
+      offlineNodes.delete(n.id);
+      await notifyAdmins(bot.api, `🟢 Узел #${n.id} (${n.server_ip}) снова онлайн.`);
+    }
+  }
+}
+setInterval(() => void monitorNodes(), 30 * 60 * 1000);
 
 await bot.start({
   onStart: (info) => console.log(`Станок-бот @${info.username} запущен`),
