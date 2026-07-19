@@ -20,9 +20,12 @@ function positiveInt(name: string, def: number): number {
 
 export const config = {
   botToken: required('SELLER_BOT_TOKEN'),
-  // id владельца бота (узла) — ему VPN бесплатно
+  // id владельца бота (узла) — ему VPN бесплатно + настройки
   ownerId: Number(process.env.OWNER_ID ?? '0'),
-  priceStars: positiveInt('PRICE_STARS', 1), // тестовая цена; поднять перед запуском
+  // начальная цена (владелец может поменять в боте — см. price.ts)
+  priceStars: positiveInt('PRICE_STARS', 1),
   days: positiveInt('VPN_DAYS', 30),
   stanokUrl: process.env.STANOK_URL ?? 'https://t.me/VPNForge_bot',
+  // папка изменяемого состояния (переживает обновления кода). Локально — текущая.
+  dataDir: process.env.DATA_DIR ?? '.',
 };

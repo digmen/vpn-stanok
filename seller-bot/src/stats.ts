@@ -1,10 +1,13 @@
 import { appendFileSync, existsSync, readFileSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import path from 'node:path';
 import { AWG } from './constants.js';
+import { config } from './config.js';
+import { activeCount } from './subscriptions.js';
 
 const execFileP = promisify(execFile);
-const FILE = 'stats.jsonl';
+const FILE = path.join(config.dataDir, 'stats.jsonl');
 
 interface Ev {
   type: 'paid' | 'free';
@@ -71,6 +74,7 @@ export async function buildStats(): Promise<string> {
     `🛒 Покупок за месяц: ${paidMonth.length} (${stars(paidMonth)} ⭐)`,
     `💰 Покупок всего: ${paid.length} (${stars(paid)} ⭐)`,
     `🆓 Выдано бесплатно: ${free}`,
+    `💳 Активных подписок: ${activeCount()}`,
     `🔑 Всего конфигов на сервере: ${total}`,
     `🟢 Онлайн сейчас: ${online}`,
   ].join('\n');

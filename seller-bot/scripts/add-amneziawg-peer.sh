@@ -24,10 +24,13 @@ IFACE_ADDR="$(val Address)"
 V4PREFIX="$(echo "$IFACE_ADDR" | cut -d',' -f1 | cut -d'/' -f1)"; V4PREFIX="${V4PREFIX%.*}"
 V6BASE="$(echo "$IFACE_ADDR" | cut -d',' -f2 | cut -d'/' -f1)"; V6PREFIX="${V6BASE%:*}:"
 
-# Следующий свободный последний октет среди пиров
-LAST="$(grep -oE 'AllowedIPs = [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' "$SERVER_CONF" | grep -oE '[0-9]+$' | sort -n | tail -1 || true)"
-NEXT=$(( ${LAST:-1} + 1 ))
-[ "$NEXT" -le 254 ] || { echo "закончились адреса в подсети" >&2; exit 1; }
+# Наименьший СВОБОДНЫЙ последний октет (переиспользуем адреса, освобождённые отзывом)
+USED="$(grep -oE 'AllowedIPs = [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' "$SERVER_CONF" | grep -oE '[0-9]+$' | sort -n -u)"
+NEXT=""
+for i in $(seq 2 254); do
+  if ! printf '%s\n' "$USED" | grep -qx "$i"; then NEXT="$i"; break; fi
+done
+[ -n "$NEXT" ] || { echo "закончились адреса в подсети" >&2; exit 1; }
 CLIENT_V4="${V4PREFIX}.${NEXT}"
 CLIENT_V6="${V6PREFIX}${NEXT}"
 
@@ -52,6 +55,7 @@ awg set "$IFACE" peer "$CLIENT_PUB" preshared-key <(printf '%s' "$CLIENT_PSK") a
   echo "AllowedIPs = ${CLIENT_V4}/32,${CLIENT_V6}/128"
 } >> "$SERVER_CONF"
 
+echo "###CLIENT_PUBKEY###${CLIENT_PUB}"
 cat <<EOF
 ###CLIENT_CONFIG_START###
 [Interface]

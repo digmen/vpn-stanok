@@ -1,7 +1,8 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
 import { config } from './config.js';
 
-const OWNER_FILE = '.owner';
+const OWNER_FILE = path.join(config.dataDir, '.owner');
 
 // Приоритет: OWNER_ID из .env → сохранённый .owner → 0 (ещё не назначен).
 let ownerId: number =
