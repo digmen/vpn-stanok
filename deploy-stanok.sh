@@ -25,7 +25,12 @@ ssh "root@${SERVER}" 'bash -s' <<'REMOTE'
 set -e
 export DEBIAN_FRONTEND=noninteractive
 command -v curl >/dev/null 2>&1 || { apt-get update -y && apt-get install -y curl; }
-command -v node >/dev/null 2>&1 || { curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y nodejs; }
+if command -v node >/dev/null 2>&1; then
+  echo "→ Node уже есть ($(node -v)) — НЕ трогаю, чтобы не сломать другие приложения на сервере."
+else
+  echo "→ Node не найден, ставлю Node 22…"
+  curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y nodejs
+fi
 command -v pm2 >/dev/null 2>&1 || npm install -g pm2
 rm -rf /root/vpn-franchise && mkdir -p /root/vpn-franchise
 tar -xzf /tmp/vpn-franchise.tar.gz -C /root/vpn-franchise --strip-components=1
