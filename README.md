@@ -177,9 +177,10 @@ covered by Jest.
 
 ## Roadmap
 
+- [x] Subscription expiry and automatic peer revocation
+- [x] Node health monitoring with admin alerts
+- [x] Owner-configurable pricing
 - [ ] Native Amnezia `vpn://` one-line keys
-- [ ] Subscription expiry and peer revocation
-- [ ] Node health monitoring
 - [ ] Multi-region endpoints
 
 ## Disclaimer
