@@ -1,13 +1,14 @@
 {
   "name": "seller-bot",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "Бот-продавец: продаёт VPN за Telegram Stars (Фаза 3). Ставится на сервер узла.",
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test src/*.test.ts"
   },
   "dependencies": {
     "dotenv": "^16.4.7",
