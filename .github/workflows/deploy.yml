@@ -56,27 +56,30 @@ jobs:
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
         run: |
+          set -euo pipefail
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
-          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
+          # tr -d '\r': секреты, заведённые из-под Windows, приезжают с CR — ssh на них спотыкается
+          printf '%s\n' "$DEPLOY_SSH_KEY" | tr -d '\r' > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
-          ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          ssh-keygen -y -f ~/.ssh/id_ed25519 >/dev/null || { echo "❌ DEPLOY_SSH_KEY нечитаем"; exit 1; }
+          HOST=$(printf '%s' "$DEPLOY_HOST" | tr -d '\r\n')
+          echo "HOST=$HOST" >> "$GITHUB_ENV"
+          ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null || {
+            echo "❌ Сервер не отдал host key — недоступен?"; exit 1; }
 
       # Заливаем ТОЛЬКО код. .env, .enckey и stanok.db на сервере не трогаем:
       # в .enckey лежит ключ шифрования паролей узлов, потеря = все креды не расшифровать.
       - name: Залить код
-        env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
         run: |
+          set -euo pipefail
           tar czf - --exclude=node_modules --exclude=.git --exclude='*.db*' \
             stanok-bot seller-bot \
-          | ssh -o StrictHostKeyChecking=yes root@"$DEPLOY_HOST" \
+          | ssh -o StrictHostKeyChecking=yes root@"$HOST" \
               'mkdir -p /root/vpn-franchise && tar xzf - -C /root/vpn-franchise'
 
       - name: Установить зависимости и перезапустить станок
-        env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
         run: |
-          ssh -o StrictHostKeyChecking=yes root@"$DEPLOY_HOST" 'bash -se' <<'REMOTE'
+          ssh -o StrictHostKeyChecking=yes root@"$HOST" 'bash -se' <<'REMOTE'
           set -euo pipefail
           cd /root/vpn-franchise/stanok-bot
           test -f .env || { echo "❌ На сервере нет stanok-bot/.env — деплой прерван, бот не трогаю."; exit 1; }
