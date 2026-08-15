@@ -9,6 +9,11 @@ on:
       - 'stanok-bot/**'
       - 'seller-bot/**'
       - '.github/workflows/deploy.yml'
+  pull_request:
+    paths:
+      - 'stanok-bot/**'
+      - 'seller-bot/**'
+      - '.github/workflows/deploy.yml'
   workflow_dispatch:
 
 concurrency:
@@ -39,6 +44,8 @@ jobs:
 
   deploy:
     needs: test
+    # На pull request только гоняем тесты — боевой сервер трогает лишь main.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     environment: production
     steps:
