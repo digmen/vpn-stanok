@@ -52,6 +52,48 @@ export function insertNode(n: {
   return Number(info.lastInsertRowid);
 }
 
+// Узел опознаём по паре (tg_user_id + IP), а не по счётчику заявок.
+// Иначе каждая повторная попытка плодит новый номер: на 15.08.2026 было 24 номера при 4 живых узлах.
+export function findNodeByUserAndIp(tgUserId: number, serverIp: string): NodeRow | undefined {
+  return db
+    .prepare('SELECT * FROM nodes WHERE tg_user_id = ? AND server_ip = ? ORDER BY id DESC LIMIT 1')
+    .get(tgUserId, serverIp) as NodeRow | undefined;
+}
+
+// Тот же IP у другого человека = почти наверняка списан из инструкции, а не из своей панели.
+// Реальный случай: 95.163.86.120 прислали двое незнакомых людей с разницей в 13 дней.
+export function findNodeByIpOfOtherUser(serverIp: string, tgUserId: number): NodeRow | undefined {
+  return db
+    .prepare('SELECT * FROM nodes WHERE server_ip = ? AND tg_user_id <> ? ORDER BY id DESC LIMIT 1')
+    .get(serverIp, tgUserId) as NodeRow | undefined;
+}
+
+// Заводит заявку или обновляет существующую (тот же человек + тот же сервер). Возвращает id узла.
+export function upsertNode(n: {
+  tgUserId: number;
+  tgUsername?: string;
+  serverIp: string;
+  rootPasswordEnc: string;
+  sellerTokenEnc: string;
+}): number {
+  const existing = findNodeByUserAndIp(n.tgUserId, n.serverIp);
+  if (!existing) return insertNode(n);
+
+  db.prepare(
+    `UPDATE nodes
+        SET tg_username = @tgUsername, root_password_enc = @rootPasswordEnc,
+            seller_token_enc = @sellerTokenEnc, status = 'pending_provision',
+            updated_at = datetime('now')
+      WHERE id = @id`,
+  ).run({
+    id: existing.id,
+    tgUsername: n.tgUsername ?? null,
+    rootPasswordEnc: n.rootPasswordEnc,
+    sellerTokenEnc: n.sellerTokenEnc,
+  });
+  return existing.id;
+}
+
 export function getNodesByUser(tgUserId: number): NodeRow[] {
   return db
     .prepare('SELECT * FROM nodes WHERE tg_user_id = ? ORDER BY id DESC')

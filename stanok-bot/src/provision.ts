@@ -7,6 +7,7 @@ import { getNodeById, setNodeStatus } from './db.js';
 import { runRemoteInstall } from './ssh.js';
 import { deploySeller, getBotUsername } from './deploy-seller.js';
 import { notifyAdmins } from './admin.js';
+import { checkSshPort, preflightMessage } from './preflight.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SCRIPT_PATH = path.resolve(__dirname, '../scripts/install-amneziawg.sh');
@@ -41,6 +42,17 @@ export async function provisionNode(
     }
   };
 
+  const retryKb = new InlineKeyboard().text('🔄 Попробовать снова', `provision:${nodeId}`);
+
+  // Сервер мог отвалиться между онбордингом и нажатием кнопки — проверяем связь заранее,
+  // чтобы не ждать таймаута SSH и сразу назвать причину.
+  const pf = await checkSshPort(node.server_ip);
+  if (!pf.ok) {
+    setNodeStatus(nodeId, 'error');
+    await show(preflightMessage(node.server_ip, pf.reason), retryKb);
+    return;
+  }
+
   setNodeStatus(nodeId, 'provisioning');
   await show(`🔌 Ставлю AmneziaWG на ${node.server_ip}… (пара минут)`);
 
@@ -74,7 +86,12 @@ export async function provisionNode(
   } catch (e) {
     setNodeStatus(nodeId, 'error');
     const msg = e instanceof Error ? e.message : String(e);
-    await show(`❌ Не получилось довести настройку:\n${msg}\n\nМы уже видим ошибку и разберёмся.`);
+    await show(
+      `❌ Не получилось довести настройку:\n${msg}\n\n` +
+        'Можно нажать «Попробовать снова» — заново вводить ничего не нужно. ' +
+        'Я уже вижу ошибку и разберусь.',
+      retryKb,
+    );
     await notifyAdmins(
       api,
       `⚠️ Провижининг узла #${nodeId} упал.\nСервер: ${node.server_ip}\nЮзер: @${node.tg_username ?? '—'} (${node.tg_user_id})\nОшибка: ${msg}`,

@@ -1,0 +1,81 @@
+name: Test & Deploy stanok
+
+# Деплой станка на боевой сервер. Пуш в main = живой бот перезапускается.
+# Поэтому: сначала тесты, деплой только если они прошли, и только по коду ботов.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'stanok-bot/**'
+      - 'seller-bot/**'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-stanok
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: stanok-bot/package-lock.json
+      - run: npm ci --no-audit --no-fund
+        working-directory: stanok-bot
+      - run: npm run typecheck
+        working-directory: stanok-bot
+      - run: npm test
+        working-directory: stanok-bot
+      - name: Проверить, что бот-продавец собирается
+        working-directory: seller-bot
+        run: |
+          npm ci --no-audit --no-fund
+          npm run typecheck
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Ключ и known_hosts
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      # Заливаем ТОЛЬКО код. .env, .enckey и stanok.db на сервере не трогаем:
+      # в .enckey лежит ключ шифрования паролей узлов, потеря = все креды не расшифровать.
+      - name: Залить код
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          tar czf - --exclude=node_modules --exclude=.git --exclude='*.db*' \
+            stanok-bot seller-bot \
+          | ssh -o StrictHostKeyChecking=yes root@"$DEPLOY_HOST" \
+              'mkdir -p /root/vpn-franchise && tar xzf - -C /root/vpn-franchise'
+
+      - name: Установить зависимости и перезапустить станок
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          ssh -o StrictHostKeyChecking=yes root@"$DEPLOY_HOST" 'bash -se' <<'REMOTE'
+          set -euo pipefail
+          cd /root/vpn-franchise/stanok-bot
+          test -f .env || { echo "❌ На сервере нет stanok-bot/.env — деплой прерван, бот не трогаю."; exit 1; }
+          npm install --no-audit --no-fund
+          pm2 restart stanok-bot --update-env
+          sleep 5
+          pm2 describe stanok-bot | grep -q "status.*online" || { echo "❌ Станок не поднялся после рестарта"; pm2 logs stanok-bot --lines 40 --nostream; exit 1; }
+          echo "✅ Станок обновлён и online"
+          REMOTE
