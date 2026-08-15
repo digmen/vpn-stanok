@@ -8,6 +8,7 @@ import { runRemoteInstall } from './ssh.js';
 import { deploySeller, getBotUsername } from './deploy-seller.js';
 import { notifyAdmins } from './admin.js';
 import { checkSshPort, preflightMessage } from './preflight.js';
+import { logEvent } from './events.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SCRIPT_PATH = path.resolve(__dirname, '../scripts/install-amneziawg.sh');
@@ -46,9 +47,12 @@ export async function provisionNode(
 
   // Сервер мог отвалиться между онбордингом и нажатием кнопки — проверяем связь заранее,
   // чтобы не ждать таймаута SSH и сразу назвать причину.
+  const who = { id: node.tg_user_id, username: node.tg_username ?? undefined };
+
   const pf = await checkSshPort(node.server_ip);
   if (!pf.ok) {
     setNodeStatus(nodeId, 'error');
+    logEvent(who, 'preflight_fail', `${node.server_ip} · ${pf.reason} · перед провижинингом`);
     await show(preflightMessage(node.server_ip, pf.reason), retryKb);
     return;
   }
@@ -75,6 +79,7 @@ export async function provisionNode(
     });
 
     setNodeStatus(nodeId, 'ready');
+    logEvent(who, 'provision_ok', node.server_ip);
     const uname = await getBotUsername(sellerToken);
     const kb = uname ? new InlineKeyboard().url('🚀 Открыть моего бота', `https://t.me/${uname}`) : undefined;
     await show(
@@ -86,6 +91,7 @@ export async function provisionNode(
   } catch (e) {
     setNodeStatus(nodeId, 'error');
     const msg = e instanceof Error ? e.message : String(e);
+    logEvent(who, 'provision_fail', `${node.server_ip} · ${msg}`.slice(0, 200));
     await show(
       `❌ Не получилось довести настройку:\n${msg}\n\n` +
         'Можно нажать «Попробовать снова» — заново вводить ничего не нужно. ' +

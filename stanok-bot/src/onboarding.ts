@@ -3,11 +3,16 @@ import { InlineKeyboard, type Context } from 'grammy';
 import { config } from './config.js';
 import { encrypt } from './crypto.js';
 import { findNodeByIpOfOtherUser, upsertNode } from './db.js';
+import { logEvent, type FunnelStep, type SideStep } from './events.js';
 import { checkSshPort, preflightMessage } from './preflight.js';
 import { checkIp, ipProblemMessage, isNonEmptySecret, isValidBotToken } from './validate.js';
 
 export type MyContext = Context & ConversationFlavor;
 export type MyConversation = Conversation<MyContext>;
+
+// Пишет шаг в журнал ровно один раз: внутри разговора код проигрывается заново,
+// а всё, что обёрнуто в conversation.external, повторно не выполняется.
+type Track = (step: FunnelStep | SideStep, detail?: string) => Promise<void>;
 
 async function del(ctx: MyContext, msgId: number): Promise<void> {
   try {
@@ -22,7 +27,12 @@ async function del(ctx: MyContext, msgId: number): Promise<void> {
 async function askStep(
   conversation: MyConversation,
   ctx: MyContext,
-  opts: { video: string; prompt: string; validate: (s: string) => string | null },
+  opts: {
+    video: string;
+    prompt: string;
+    validate: (s: string) => string | null;
+    onReject?: (input: string) => Promise<void>;
+  },
 ): Promise<string> {
   let errId: number | undefined;
   for (;;) {
@@ -48,13 +58,19 @@ async function askStep(
 
     const err = opts.validate(text);
     if (err === null) return text;
+    if (opts.onReject) await opts.onReject(text);
     errId = (await ctx.reply(err)).message_id;
   }
 }
 
 // Спрашивает IP, пока не пришлют осмысленный: не пример из инструкции, не адрес за NAT
 // и не сервер, уже занятый другим человеком.
-async function askIp(conversation: MyConversation, ctx: MyContext, tgUserId: number): Promise<string> {
+async function askIp(
+  conversation: MyConversation,
+  ctx: MyContext,
+  tgUserId: number,
+  track: Track,
+): Promise<string> {
   return askStep(conversation, ctx, {
     video: config.videos.ip,
     // Пример специально не показываем: люди присылали его как свой (реальный случай — 123.45.67.88).
@@ -73,22 +89,34 @@ async function askIp(conversation: MyConversation, ctx: MyContext, tgUserId: num
       }
       return null;
     },
+    onReject: async (input) => {
+      const problem = checkIp(input);
+      await (problem ? track('ip_rejected', problem) : track('ip_taken', input));
+    },
   });
 }
 
 // Проверяем доступность сервера ДО того, как просить пароль. Пока не отвечает — пароль не нужен.
-async function ipThatAnswers(conversation: MyConversation, ctx: MyContext, tgUserId: number): Promise<string> {
-  let ip = await askIp(conversation, ctx, tgUserId);
+async function ipThatAnswers(
+  conversation: MyConversation,
+  ctx: MyContext,
+  tgUserId: number,
+  track: Track,
+): Promise<string> {
+  let ip = await askIp(conversation, ctx, tgUserId, track);
+  await track('ip_ok', ip);
   const statusMsg = await ctx.reply(`🔍 Проверяю, отвечает ли сервер ${ip}…`);
 
   for (;;) {
     const res = await conversation.external(() => checkSshPort(ip));
     if (res.ok) {
+      await track('preflight_ok', ip);
       await ctx.api
         .editMessageText(ctx.chat!.id, statusMsg.message_id, `✅ Сервер ${ip} отвечает — продолжаем настройку.`)
         .catch(() => {});
       return ip;
     }
+    await track('preflight_fail', `${ip} · ${res.reason}`);
 
     const kb = new InlineKeyboard().text('🔄 Проверить снова', 'pf:retry').text('✏️ Другой IP', 'pf:new');
     await ctx.api
@@ -101,16 +129,19 @@ async function ipThatAnswers(conversation: MyConversation, ctx: MyContext, tgUse
 
     if (data === 'pf:new' || (!data && upd.message?.text)) {
       // «Другой IP» или человек просто прислал новый адрес сообщением
+      await track('newip_click');
       const typed = upd.message?.text?.trim();
       if (typed && checkIp(typed) === null && !findNodeByIpOfOtherUser(typed, tgUserId)) {
         await del(ctx, upd.message!.message_id);
         ip = typed;
       } else {
         if (upd.message) await del(ctx, upd.message.message_id);
-        ip = await askIp(conversation, ctx, tgUserId);
+        ip = await askIp(conversation, ctx, tgUserId, track);
       }
+      await track('ip_ok', ip);
+    } else {
+      await track('retry_click', ip);
     }
-    // 'pf:retry' и всё прочее — просто пробуем тот же адрес ещё раз
 
     await ctx.api
       .editMessageText(ctx.chat!.id, statusMsg.message_id, `🔍 Проверяю, отвечает ли сервер ${ip}…`)
@@ -121,7 +152,10 @@ async function ipThatAnswers(conversation: MyConversation, ctx: MyContext, tgUse
 // Диалог онбординга: IP → проверка связи → root-пароль → токен бота-продавца.
 export async function onboarding(conversation: MyConversation, ctx: MyContext) {
   const from = ctx.from!;
-  const ip = await ipThatAnswers(conversation, ctx, from.id);
+  const track: Track = (step, detail) =>
+    conversation.external(() => logEvent({ id: from.id, username: from.username }, step, detail));
+
+  const ip = await ipThatAnswers(conversation, ctx, from.id, track);
 
   const rootPassword = await askStep(conversation, ctx, {
     video: config.videos.password,
@@ -129,6 +163,7 @@ export async function onboarding(conversation: MyConversation, ctx: MyContext) {
     validate: (s) =>
       isNonEmptySecret(s) ? null : '❌ Пароль пустой или слишком короткий. Пришли ещё раз:',
   });
+  await track('password_ok'); // сам пароль в журнал не попадает — только факт
 
   const sellerToken = await askStep(conversation, ctx, {
     video: config.videos.token,
@@ -138,6 +173,7 @@ export async function onboarding(conversation: MyConversation, ctx: MyContext) {
     validate: (s) =>
       isValidBotToken(s) ? null : '❌ Это не похоже на токен бота. Пример: 123456789:AAH... Пришли ещё раз:',
   });
+  await track('token_ok');
 
   const id = await conversation.external(() =>
     upsertNode({
