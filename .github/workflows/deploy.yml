@@ -41,6 +41,7 @@ jobs:
         run: |
           npm ci --no-audit --no-fund
           npm run typecheck
+          npm test
 
   deploy:
     needs: test

@@ -11,6 +11,7 @@
     "e2e": "tsx scripts/e2e.ts",
     "report": "tsx scripts/report.ts",
     "pull-events": "tsx scripts/pull-events.ts",
+    "push-seller": "tsx scripts/push-seller.ts",
     "test": "node --experimental-vm-modules ./node_modules/jest/bin/jest.js"
   },
   "dependencies": {
