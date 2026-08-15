@@ -19,6 +19,9 @@ stats.jsonl
 # Deploy artifacts
 *.tar.gz
 
+# Состояние сквозного теста (id живого тестового VPS)
+.e2e-state.json
+
 # OS / editor
 .DS_Store
 Thumbs.db
