@@ -6,6 +6,7 @@ import { onboarding, type MyContext } from './onboarding.js';
 import { provisionNode } from './provision.js';
 import { notifyAdmins } from './admin.js';
 import { checkNodeAlive } from './ssh.js';
+import { logEvent } from './events.js';
 import { decrypt } from './crypto.js';
 
 const bot = new Bot<MyContext>(config.botToken);
@@ -16,6 +17,7 @@ bot.use(createConversation(onboarding));
 
 // ── Шаг 1: купить сервер ────────────────────────────────────────────────
 bot.command('start', async (ctx) => {
+  logEvent(ctx.from!, 'start');
   const kb = new InlineKeyboard()
     .url('🛒 Купить сервер', config.referralLink)
     .row()
@@ -41,6 +43,7 @@ bot.command('start', async (ctx) => {
 
 bot.callbackQuery('instr', async (ctx) => {
   await ctx.answerCallbackQuery();
+  logEvent(ctx.from, 'instr_open');
   if (config.videos.buy) {
     try {
       await ctx.replyWithVideo(config.videos.buy);
@@ -64,6 +67,7 @@ bot.callbackQuery('instr', async (ctx) => {
 // ── Шаг 2: настроить ────────────────────────────────────────────────────
 bot.callbackQuery('bought', async (ctx) => {
   await ctx.answerCallbackQuery();
+  logEvent(ctx.from, 'bought_click');
   const kb = new InlineKeyboard().text('⚙️ Настроить', 'setup');
   // Морфим то же сообщение в Шаг 2 — чат не засоряется
   await ctx.editMessageText(
@@ -81,6 +85,7 @@ bot.callbackQuery('bought', async (ctx) => {
 
 bot.callbackQuery('setup', async (ctx) => {
   await ctx.answerCallbackQuery();
+  logEvent(ctx.from, 'setup_click');
   await ctx.deleteMessage().catch(() => {}); // убираем сообщение Шага 2, чтобы не висело
   await ctx.conversation.enter('onboarding');
 });
@@ -89,6 +94,7 @@ bot.callbackQuery('setup', async (ctx) => {
 bot.callbackQuery(/^provision:(\d+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
   const nodeId = Number(ctx.match[1]);
+  logEvent(ctx.from, 'provision_click', String(nodeId));
   // Редактируем то же сообщение («Данные приняты»), а не плодим новые
   await provisionNode(ctx.api, ctx.chat!.id, nodeId, ctx.callbackQuery.message?.message_id);
 });
