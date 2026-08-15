@@ -30,12 +30,18 @@ export async function deploySeller(opts: DeployOpts): Promise<void> {
   try {
     const remoteDir = REMOTE.SELLER_DIR;
 
-    // 1. Node.js 22 (если нет)
-    if (!(await ssh.execCommand('command -v node || true')).stdout.trim()) {
+    // 1. Node.js 22 (если нет). Проверяем node И npm: на урезанных образах провайдеров
+    // встречается голый node без npm — тогда шаг с pm2 падал на `npm: command not found` (узел #14).
+    const hasNode = (await ssh.execCommand('command -v node || true')).stdout.trim();
+    const hasNpm = (await ssh.execCommand('command -v npm || true')).stdout.trim();
+    if (!hasNode || !hasNpm) {
       const r = await ssh.execCommand(
         `curl -fsSL ${REMOTE.NODE_SETUP_URL} | bash - && apt-get install -y nodejs`,
       );
       if (r.code !== 0) throw new Error('Node.js не установился: ' + (r.stderr || r.stdout).slice(0, 300));
+      if (!(await ssh.execCommand('command -v npm || true')).stdout.trim()) {
+        throw new Error('на сервере есть node, но нет npm — образ провайдера нестандартный');
+      }
     }
 
     // 2. pm2 (если нет)
