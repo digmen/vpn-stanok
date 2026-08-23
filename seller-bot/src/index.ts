@@ -1,8 +1,22 @@
 import { Bot, InlineKeyboard } from 'grammy';
 import { config } from './config.js';
-import { createVpnPeer, revokePeer, type Peer } from './vpn.js';
-import { activeClients, addSubscription, getExpired, removeSubscription, revenueStars } from './subscriptions.js';
-import { offerConfig, registerDeliveryHandlers } from './delivery.js';
+import { createVpnPeer, createVpnPeersEverywhere, revokePeerAt, type Peer } from './vpn.js';
+import { activeClients, addSubscription, getExpiredPeers, removePeer, revenueStars } from './subscriptions.js';
+import { offerConfig, offerConfigs, registerDeliveryHandlers } from './delivery.js';
+import {
+  addRemote,
+  allLocations,
+  findLocation,
+  isValidHost,
+  LOCATION_LIMITS,
+  nextLocationId,
+  PRIMARY_LOCATION_ID,
+  remoteCount,
+  removeRemote,
+  renameLocation,
+  saveKey,
+} from './locations.js';
+import { attachServer, ping } from './ssh.js';
 import { claimOwnerIfUnset, getOwnerId } from './owner.js';
 import { readOwnerConfig, saveOwnerConfig } from './owner-config.js';
 import { buildStats, recordEvent } from './stats.js';
@@ -30,7 +44,11 @@ const APP_LINKS =
 
 // Владелец вводит значение текстом. Одно ожидание за раз — состояние простое и не переживает
 // перезапуск специально: зависшее ожидание не должно жевать чужие сообщения.
-type PendingKind = 'pkg-price' | 'pkg-days' | 'pkg-new-days' | 'pkg-new-stars' | 'welcome-text' | 'welcome-photo' | 'trial-days';
+type PendingKind =
+  | 'pkg-price' | 'pkg-days' | 'pkg-new-days' | 'pkg-new-stars'
+  | 'welcome-text' | 'welcome-photo' | 'trial-days'
+  // Добавление локации: сначала адрес, потом пароль, потом название
+  | 'loc-host' | 'loc-password' | 'loc-title' | 'loc-rename';
 let pending: { kind: PendingKind; arg?: string; at: number } | null = null;
 const PROMPT_TTL_MS = 180_000;
 
@@ -130,14 +148,16 @@ bot.on('message:successful_payment', async (ctx) => {
   const pkg = findPackage(pay.invoice_payload.replace(/^pkg:/, ''));
   const days = pkg?.days ?? config.days;
   recordEvent({ type: 'paid', stars: pay.total_amount, userId: ctx.from.id });
-  const peer = await generate(ctx.api, ctx.chat.id);
-  if (!peer) return;
-  await offerConfig(ctx.api, ctx.chat.id, peer.config);
-  addSubscription(peer.pubkey, days, {
-    userId: ctx.from.id,
-    username: ctx.from.username,
-    stars: pay.total_amount,
-  });
+  // Платный тариф даёт доступ ко ВСЕМ локациям — ровно то, о чём просил
+  // франчайзи: «покупает на месяц, а ему доступен Лондон, Финляндия».
+  const peers = await generateEverywhere(ctx.api, ctx.chat.id);
+  if (peers.length === 0) return;
+  addSubscription(
+    peers.map((p) => ({ loc: p.loc, pubkey: p.pubkey })),
+    days,
+    { userId: ctx.from.id, username: ctx.from.username, stars: pay.total_amount },
+  );
+  await offerConfigs(ctx.api, ctx.chat.id, peers.map((p) => ({ config: p.config, title: p.locTitle })));
 });
 
 // ── пробный период ────────────────────────────────────────────────────────
@@ -150,12 +170,19 @@ bot.callbackQuery('trial', async (ctx) => {
     await ctx.reply('Пробный период у тебя уже был — дальше только по подписке.');
     return;
   }
+  // Пробный — только основная локация. Это и естественный повод перейти на
+  // платный («в подписке доступны все страны»), и меньше мусорных пиров
+  // на серверах от тех, кто попробовал и ушёл.
   const peer = await generate(ctx.api, ctx.chat!.id);
   if (!peer) return;
   markTrialUsed(userId);
   recordEvent({ type: 'free', userId });
-  addSubscription(peer.pubkey, s.trial.days, { userId, username: ctx.from?.username, stars: 0 });
-  await offerConfig(ctx.api, ctx.chat!.id, peer.config);
+  addSubscription([{ loc: peer.loc, pubkey: peer.pubkey }], s.trial.days, {
+    userId,
+    username: ctx.from?.username,
+    stars: 0,
+  });
+  await offerConfig(ctx.api, ctx.chat!.id, peer.config, peer.locTitle);
   await ctx.reply(`🎁 Пробный доступ на ${s.trial.days} дн. активен. Приложение — кнопка «Установить приложение».`);
 });
 
@@ -170,6 +197,8 @@ function adminMenu(): InlineKeyboard {
     .row()
     .text('👥 Клиенты', 'clients')
     .text('📊 Статистика', 'stats')
+    .row()
+    .text('🌍 Локации', 'locs')
     .row()
     .text('🆓 Мой VPN', 'free')
     .text('⬆️ Обновление', 'upd')
@@ -327,11 +356,102 @@ bot.callbackQuery('clients', async (ctx) => {
       ? 'Пока никто не купил.'
       : rows
           .slice(0, 40)
-          .map((r) => `• ${r.who} — осталось ${r.daysLeft} дн.${r.stars ? ` · ${r.stars} ⭐` : ' · пробный'}`)
+          .map(
+            (r) =>
+              `• ${r.who} — осталось ${r.daysLeft} дн.${r.stars ? ` · ${r.stars} ⭐` : ' · пробный'}` +
+              (r.locations > 1 ? ` · ${r.locations} локации` : ''),
+          )
           .join('\n');
   await ctx
     .editMessageText(head + list, { reply_markup: new InlineKeyboard().text('← Назад', 'admin') })
     .catch(() => {});
+});
+
+// ── локации (несколько стран у одного бота) ───────────────────────────────
+//
+// Флоу добавления: адрес → пароль → бот заходит, ставит себе ключ, забывает
+// пароль → название. Пароль спрашивается ровно один раз и на диск не попадает
+// (см. attachServer в ssh.ts и saveKey в locations.ts).
+async function showLocations(ctx: any, note?: string): Promise<void> {
+  const locs = allLocations();
+  const kb = new InlineKeyboard();
+  for (const l of locs) {
+    kb.text(`${l.kind === 'local' ? '🏠' : '🌍'} ${l.title}`, `loc:${l.id}`).row();
+  }
+  if (remoteCount() < LOCATION_LIMITS.MAX_REMOTE) kb.text('➕ Добавить сервер', 'locadd').row();
+  kb.text('← Назад', 'admin');
+
+  const text =
+    '🌍 Локации — серверы, с которых выдаются ключи.\n\n' +
+    `Сейчас: ${locs.length}. Клиент при покупке получает ключ на КАЖДУЮ — ` +
+    'если одна страна ляжет, он переключится на другую прямо в приложении.\n\n' +
+    (locs.length === 1
+      ? '💡 Пока сервер один. Добавь второй — это заметное преимущество перед конкурентами, ' +
+        'и за него можно брать дороже.'
+      : 'Нажми на локацию, чтобы переименовать или убрать.') +
+    (note ? `\n\n${note}` : '');
+  await ctx.editMessageText(text, { reply_markup: kb }).catch(async () => {
+    await ctx.reply(text, { reply_markup: kb });
+  });
+}
+
+bot.callbackQuery('locs', async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!isOwner(ctx.from?.id)) return;
+  pending = null;
+  await showLocations(ctx);
+});
+
+bot.callbackQuery('locadd', async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!isOwner(ctx.from?.id)) return;
+  if (remoteCount() >= LOCATION_LIMITS.MAX_REMOTE) return;
+  await ctx.reply(
+    '➕ Новый сервер.\n\n' +
+      'Пришли его IP-адрес.\n\n' +
+      '⚠️ На сервере уже должен быть поднят VPN — заведи его через ' +
+      `${config.stanokUrl}, а потом добавь сюда.`,
+    { reply_markup: ask('loc-host'), link_preview_options: { is_disabled: true } },
+  );
+});
+
+bot.callbackQuery(/^loc:(.+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!isOwner(ctx.from?.id)) return;
+  const loc = findLocation(ctx.match[1]);
+  if (!loc) return;
+  const kb = new InlineKeyboard().text('✏️ Переименовать', `locren:${loc.id}`);
+  if (loc.kind !== 'local') kb.text('🗑 Убрать', `locdel:${loc.id}`);
+  kb.row().text('← Назад', 'locs');
+
+  let status = 'это сервер, на котором работает сам бот';
+  if (loc.kind === 'ssh') {
+    status = (await ping(loc.remote!)) ? '🟢 на связи' : '🔴 не отвечает';
+  }
+  await ctx
+    .editMessageText(`${loc.title}\n\n${loc.kind === 'ssh' ? `Адрес: ${loc.remote!.host}\n` : ''}Статус: ${status}`, {
+      reply_markup: kb,
+    })
+    .catch(() => {});
+});
+
+bot.callbackQuery(/^locren:(.+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!isOwner(ctx.from?.id)) return;
+  const loc = findLocation(ctx.match[1]);
+  if (!loc) return;
+  await ctx.reply(`Пришли новое название для «${loc.title}». Его увидят клиенты — пиши страну или город.`, {
+    reply_markup: ask('loc-rename', loc.id),
+  });
+});
+
+bot.callbackQuery(/^locdel:(.+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!isOwner(ctx.from?.id)) return;
+  const id = ctx.match[1];
+  if (id === PRIMARY_LOCATION_ID) return; // основную убрать нельзя — бот на ней и живёт
+  const ok = removeRemote(id);
+  await showLocations(ctx, ok ? '🗑 Локация убрана. Новые ключи на неё выдаваться не будут.' : 'Не нашёл такую.');
 });
 
 bot.callbackQuery('stats', async (ctx) => {
@@ -436,6 +556,69 @@ bot.on('message:text', async (ctx) => {
     return;
   }
 
+  // ── добавление локации ──────────────────────────────────────────────────
+  if (kind === 'loc-host') {
+    if (!isValidHost(text)) {
+      await ctx.reply('❌ Это не похоже на IP или домен. Пришли адрес сервера, например 203.0.113.10');
+      return;
+    }
+    await ctx.reply(
+      'Теперь пришли root-пароль от этого сервера.\n\n' +
+        '🔒 Он нужен ровно один раз: я зайду, поставлю себе отдельный ключ доступа и пароль забуду — ' +
+        'нигде не сохраняю. Можешь сменить его сразу после, ничего не сломается.',
+      { reply_markup: ask('loc-password', text) },
+    );
+    return;
+  }
+
+  if (kind === 'loc-password') {
+    const host = arg!;
+    const password = text;
+    pending = null;
+    // Пароль в чате — сразу удаляем сообщение: он не должен остаться в истории
+    // ни у него, ни на серверах телеграма дольше необходимого.
+    await ctx.deleteMessage().catch(() => {});
+    const wait = await ctx.reply('⏳ Подключаюсь к серверу…');
+    try {
+      const { privateKey, amneziaInstalled } = await attachServer(host, 'root', password);
+      if (!amneziaInstalled) {
+        await ctx.api
+          .editMessageText(
+            ctx.chat.id,
+            wait.message_id,
+            '❌ Зайти получилось, но VPN на этом сервере не найден.\n\n' +
+              `Сначала подними на нём VPN через ${config.stanokUrl}, потом добавь сюда.`,
+            { link_preview_options: { is_disabled: true } },
+          )
+          .catch(() => {});
+        return;
+      }
+      const id = nextLocationId();
+      const keyFile = `loc-${id}.key`;
+      saveKey(keyFile, privateKey);
+      addRemote({ id, title: host, host, user: 'root', keyFile });
+      await ctx.api.deleteMessage(ctx.chat.id, wait.message_id).catch(() => {});
+      await ctx.reply(
+        `✅ Сервер ${host} подключён.\n\nКак назвать эту локацию? Название увидят клиенты — ` +
+          'пришли страну или город, например «Лондон».',
+        { reply_markup: ask('loc-title', id) },
+      );
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      await ctx.api
+        .editMessageText(ctx.chat.id, wait.message_id, '❌ Не получилось подключиться.\n\nТех. детали:\n' + msg)
+        .catch(() => {});
+    }
+    return;
+  }
+
+  if (kind === 'loc-title' || kind === 'loc-rename') {
+    pending = null;
+    renameLocation(arg!, text);
+    await ctx.reply(`✅ Локация теперь называется «${text.trim().slice(0, LOCATION_LIMITS.MAX_TITLE_LEN)}».`);
+    return;
+  }
+
   if (kind === 'pkg-price' || kind === 'pkg-new-stars') {
     if (!isValidStars(n)) {
       await ctx.reply(`❌ Нужно целое число от 1 до ${LIMITS.MAX_STARS}.`);
@@ -498,13 +681,68 @@ async function generate(api: typeof bot.api, chatId: number): Promise<Peer | nul
   }
 }
 
-// Раз в час отзываем истёкшие подписки (удаляем пиры с сервера)
+/**
+ * Выдача на всех локациях сразу — для платных тарифов.
+ *
+ * 🔴 Частичный успех считается успехом: человек уже заплатил. Если из трёх
+ * стран поднялись две — отдаём две и честно говорим про третью. Уронить всю
+ * покупку из-за одного лежащего сервера было бы худшим из возможных исходов,
+ * тем более что фича затевалась ровно про «сервера в одной стране легли».
+ * Владельцу о падении сообщаем отдельно — он должен узнать раньше клиентов.
+ */
+async function generateEverywhere(api: typeof bot.api, chatId: number): Promise<Peer[]> {
+  const wait = await api.sendMessage(chatId, '⏳ Генерирую VPN…');
+  const { peers, failed } = await createVpnPeersEverywhere();
+  await api.deleteMessage(chatId, wait.message_id).catch(() => {});
+
+  if (failed.length > 0) {
+    const ownerId = getOwnerId();
+    if (ownerId) {
+      await api
+        .sendMessage(
+          ownerId,
+          '⚠️ При выдаче ключа не ответили серверы:\n' +
+            failed.map((f) => `• ${f.title}: ${f.reason}`).join('\n') +
+            '\n\nКлиент получил доступ к остальным. Проверь эти узлы.',
+        )
+        .catch(() => {});
+    }
+  }
+
+  if (peers.length === 0) {
+    await api
+      .sendMessage(
+        chatId,
+        '❌ Не получилось выдать VPN — ни один сервер не ответил.\n\n' +
+          'Деньги не потеряны: напиши владельцу бота, он разберётся и выдаст ключ вручную.',
+      )
+      .catch(() => {});
+    return [];
+  }
+
+  if (failed.length > 0) {
+    await api
+      .sendMessage(
+        chatId,
+        `⚠️ Одна из локаций сейчас недоступна (${failed.map((f) => f.title).join(', ')}) — ` +
+          'выдал ключи на остальные. Как только починим, напишу и пришлю недостающие.',
+      )
+      .catch(() => {});
+  }
+  return peers;
+}
+
+// Раз в час отзываем истёкшие подписки (удаляем пиры с серверов).
+// У одной подписки теперь может быть несколько ключей на разных локациях —
+// отзываем каждый там, где он выдан, и по одному. Упавший сервер не должен
+// мешать отозвать ключи на остальных: иначе один лежащий узел оставил бы
+// бесплатный доступ на всех прочих.
 async function sweepExpired(): Promise<void> {
-  for (const pubkey of getExpired()) {
+  for (const peer of getExpiredPeers()) {
     try {
-      await revokePeer(pubkey);
-      removeSubscription(pubkey); // убираем из хранилища только после успешного отзыва
-      console.log('Отозван истёкший ключ:', pubkey);
+      await revokePeerAt(peer.loc, peer.pubkey);
+      removePeer(peer.pubkey); // убираем из хранилища только после успешного отзыва
+      console.log('Отозван истёкший ключ:', peer.pubkey, 'на', peer.loc);
     } catch (e) {
       console.error('Не удалось отозвать ключ (повторим позже):', e instanceof Error ? e.message : e);
     }

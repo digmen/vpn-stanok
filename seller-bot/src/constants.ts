@@ -10,3 +10,10 @@ export const AWG = {
 } as const;
 
 export const PEER_SCRIPT_TIMEOUT_MS = 60_000;
+
+// Доступ к дополнительным локациям (см. locations.ts). Те же значения, что
+// в станке: он ходит на те же серверы теми же способами.
+export const SSH = {
+  PORT: 22,
+  READY_TIMEOUT_MS: 30_000,
+} as const;
