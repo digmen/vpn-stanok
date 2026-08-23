@@ -22,6 +22,8 @@ export interface RemoteLocation {
   id: string;
   title: string;
   host: string;
+  /** SSH-порт. Не хранится, если стандартный 22 — старые записи его и не имеют. */
+  port?: number;
   user: string;
   /** Имя файла с приватным ключом внутри dataDir (сам ключ рядом, права 600). */
   keyFile: string;
@@ -53,6 +55,7 @@ function readRemotes(): RemoteLocation[] {
         id: r.id,
         title: String(r.title ?? r.host).slice(0, LOCATION_LIMITS.MAX_TITLE_LEN),
         host: r.host,
+        ...(Number.isInteger(r.port) && Number(r.port) > 0 ? { port: Number(r.port) } : {}),
         user: String(r.user ?? 'root'),
         keyFile: r.keyFile,
         addedAt: Number(r.addedAt) || Date.now(),
@@ -182,6 +185,26 @@ export function renameLocation(id: string, title: string): void {
   if (!row) return;
   row.title = clean;
   writeRemotes(list);
+}
+
+/**
+ * Разбирает «адрес» так, как его пишет человек: `1.2.3.4`, `1.2.3.4:2222`,
+ * `vpn.example.com:22`.
+ *
+ * Зачем вообще порт (23.08): у первого же клиента SSH оказался НЕ на 22 —
+ * бот упирался в «Timed out while waiting for handshake» и добавить сервер
+ * было физически нельзя. Провайдеры (и сами владельцы, ради защиты от
+ * брутфорса) часто уводят SSH на другой порт — это норма, а не экзотика.
+ */
+export function parseHostPort(s: string): { host: string; port?: number } | null {
+  const v = s.trim();
+  const m = v.match(/^(.+?):(\d{1,5})$/);
+  if (!m) return isValidHost(v) ? { host: v } : null;
+  const host = m[1];
+  const port = Number(m[2]);
+  if (!isValidHost(host) || port < 1 || port > 65535) return null;
+  // 22 не храним: пусть запись выглядит так же, как у всех остальных.
+  return port === 22 ? { host } : { host, port };
 }
 
 /** Простая проверка IPv4/hostname — чтобы не гонять SSH на явную опечатку. */

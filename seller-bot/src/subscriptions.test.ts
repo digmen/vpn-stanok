@@ -10,7 +10,7 @@ process.env.SELLER_BOT_TOKEN ??= '1:test';
 process.env.DATA_DIR ??= fs.mkdtempSync(path.join(os.tmpdir(), 'seller-test-'));
 
 const { normalizeSub } = await import('./subscriptions.js');
-const { PRIMARY_LOCATION_ID, isValidHost } = await import('./locations.js');
+const { PRIMARY_LOCATION_ID, isValidHost, parseHostPort } = await import('./locations.js');
 
 // 🔴 Самое опасное место бота: на живых узлах уже лежат подписки, за которые
 // заплатили. Ошибка в чтении старого формата = у клиентов молча пропал доступ,
@@ -79,4 +79,22 @@ test('проверка адреса сервера перед SSH', () => {
   assert.ok(!isValidHost('999.1.1.1'));
   assert.ok(!isValidHost('не адрес'));
   assert.ok(!isValidHost('localhost'));   // без точки — почти наверняка опечатка
+});
+
+// 23.08: у первого же клиента SSH оказался не на 22 — бот молча упирался
+// в таймаут. Разбор адреса с портом теперь часть обязательного пути.
+test('адрес с портом разбирается, 22 не хранится', () => {
+  assert.deepEqual(parseHostPort('203.0.113.10'), { host: '203.0.113.10' });
+  assert.deepEqual(parseHostPort('203.0.113.10:2222'), { host: '203.0.113.10', port: 2222 });
+  assert.deepEqual(parseHostPort(' vpn.example.com:2222 '), { host: 'vpn.example.com', port: 2222 });
+  // Стандартный порт не сохраняем: запись должна выглядеть как у всех остальных
+  assert.deepEqual(parseHostPort('203.0.113.10:22'), { host: '203.0.113.10' });
+});
+
+test('битый адрес с портом отбрасывается', () => {
+  assert.equal(parseHostPort('203.0.113.10:0'), null);
+  assert.equal(parseHostPort('203.0.113.10:70000'), null);
+  assert.equal(parseHostPort('999.1.1.1:22'), null);
+  assert.equal(parseHostPort(':22'), null);
+  assert.equal(parseHostPort('не адрес'), null);
 });

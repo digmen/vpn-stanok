@@ -7,8 +7,8 @@ import {
   addRemote,
   allLocations,
   findLocation,
-  isValidHost,
   LOCATION_LIMITS,
+  parseHostPort,
   nextLocationId,
   PRIMARY_LOCATION_ID,
   remoteCount,
@@ -409,6 +409,7 @@ bot.callbackQuery('locadd', async (ctx) => {
   await ctx.reply(
     '➕ Новый сервер.\n\n' +
       'Пришли его IP-адрес.\n\n' +
+      'Если SSH у тебя не на стандартном порту — через двоеточие: 203.0.113.10:2222\n\n' +
       '⚠️ На сервере уже должен быть поднят VPN — заведи его через ' +
       `${config.stanokUrl}, а потом добавь сюда.`,
     { reply_markup: ask('loc-host'), link_preview_options: { is_disabled: true } },
@@ -429,7 +430,7 @@ bot.callbackQuery(/^loc:(.+)$/, async (ctx) => {
     status = (await ping(loc.remote!)) ? '🟢 на связи' : '🔴 не отвечает';
   }
   await ctx
-    .editMessageText(`${loc.title}\n\n${loc.kind === 'ssh' ? `Адрес: ${loc.remote!.host}\n` : ''}Статус: ${status}`, {
+    .editMessageText(`${loc.title}\n\n${loc.kind === 'ssh' ? `Адрес: ${loc.remote!.host}${loc.remote!.port ? ':' + loc.remote!.port : ''}\n` : ''}Статус: ${status}`, {
       reply_markup: kb,
     })
     .catch(() => {});
@@ -558,21 +559,27 @@ bot.on('message:text', async (ctx) => {
 
   // ── добавление локации ──────────────────────────────────────────────────
   if (kind === 'loc-host') {
-    if (!isValidHost(text)) {
-      await ctx.reply('❌ Это не похоже на IP или домен. Пришли адрес сервера, например 203.0.113.10');
+    const addr = parseHostPort(text);
+    if (!addr) {
+      await ctx.reply(
+        '❌ Это не похоже на адрес сервера. Пришли IP или домен, например 203.0.113.10 ' +
+          '(или 203.0.113.10:2222, если SSH на другом порту).',
+      );
       return;
     }
+    // Дальше несём адрес одной строкой — порт восстанавливаем тем же разбором.
+    const addrText = addr.port ? `${addr.host}:${addr.port}` : addr.host;
     await ctx.reply(
       'Теперь пришли root-пароль от этого сервера.\n\n' +
         '🔒 Он нужен ровно один раз: я зайду, поставлю себе отдельный ключ доступа и пароль забуду — ' +
         'нигде не сохраняю. Можешь сменить его сразу после, ничего не сломается.',
-      { reply_markup: ask('loc-password', text) },
+      { reply_markup: ask('loc-password', addrText) },
     );
     return;
   }
 
   if (kind === 'loc-password') {
-    const host = arg!;
+    const { host, port } = parseHostPort(arg!)!;
     const password = text;
     pending = null;
     // Пароль в чате — сразу удаляем сообщение: он не должен остаться в истории
@@ -580,7 +587,7 @@ bot.on('message:text', async (ctx) => {
     await ctx.deleteMessage().catch(() => {});
     const wait = await ctx.reply('⏳ Подключаюсь к серверу…');
     try {
-      const { privateKey, amneziaInstalled } = await attachServer(host, 'root', password);
+      const { privateKey, amneziaInstalled } = await attachServer(host, 'root', password, port ?? 22);
       if (!amneziaInstalled) {
         await ctx.api
           .editMessageText(
@@ -596,7 +603,7 @@ bot.on('message:text', async (ctx) => {
       const id = nextLocationId();
       const keyFile = `loc-${id}.key`;
       saveKey(keyFile, privateKey);
-      addRemote({ id, title: host, host, user: 'root', keyFile });
+      addRemote({ id, title: host, host, ...(port ? { port } : {}), user: 'root', keyFile });
       await ctx.api.deleteMessage(ctx.chat.id, wait.message_id).catch(() => {});
       await ctx.reply(
         `✅ Сервер ${host} подключён.\n\nКак назвать эту локацию? Название увидят клиенты — ` +
