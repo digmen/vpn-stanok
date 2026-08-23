@@ -8,6 +8,7 @@ import { notifyAdmins } from './admin.js';
 import { checkNodeAlive } from './ssh.js';
 import { logEvent } from './events.js';
 import { decrypt } from './crypto.js';
+import { COMMISSION_PERCENT, commission, revenueReport, syncNode } from './revenue.js';
 
 const bot = new Bot<MyContext>(config.botToken);
 
@@ -131,6 +132,50 @@ bot.command('nodes', async (ctx) => {
   await ctx.reply('Узлы:\n' + lines.join('\n'));
 });
 
+// Выручка узлов (только админ). Основание для процента с продаж.
+//
+// 🔒 Узлы об этом не знают и знать не должны — сбор молчаливый, на их стороне
+// ничего не меняется (см. revenue.ts). Команда админская: чужой /revenue
+// просто игнорируется, как и /nodes.
+bot.command('revenue', async (ctx) => {
+  if (!config.adminIds.includes(ctx.from?.id ?? -1)) return;
+
+  // Без аргумента — показываем накопленное; `/revenue sync` идёт по серверам.
+  if ((ctx.match ?? '').trim() === 'sync') {
+    const wait = await ctx.reply('⏳ Обхожу узлы…');
+    const results = await Promise.all(getReadyNodes().map((n) => syncNode(n)));
+    const failed = results.filter((r) => !r.ok);
+    const added = results.reduce((s, r) => s + r.added, 0);
+    await ctx.api
+      .editMessageText(
+        ctx.chat.id,
+        wait.message_id,
+        `Готово. Узлов: ${results.length}, новых продаж: ${added}.` +
+          (failed.length ? `\n\nНе ответили: ${failed.map((f) => `#${f.nodeId}`).join(', ')}` : ''),
+      )
+      .catch(() => {});
+    return;
+  }
+
+  const rows = revenueReport();
+  const lines = rows.map((r) => {
+    const who = r.username ? '@' + r.username : r.serverIp;
+    const week = r.weekStars > 0 ? `${r.weekStars} ⭐ (${r.weekCount})` : '—';
+    return (
+      `#${r.nodeId} ${who}\n` +
+      `   за неделю: ${week} · твои ${COMMISSION_PERCENT}%: ${commission(r.weekStars)} ⭐\n` +
+      `   всего: ${r.totalStars} ⭐ за ${r.totalCount} продаж` +
+      (r.trials ? ` · пробных ${r.trials}` : '')
+    );
+  });
+  const weekTotal = rows.reduce((s, r) => s + r.weekStars, 0);
+  await ctx.reply(
+    (lines.length ? lines.join('\n\n') : 'Продаж пока не видно.') +
+      `\n\n💰 Итого за неделю: ${weekTotal} ⭐ · твои ${COMMISSION_PERCENT}%: ${commission(weekTotal)} ⭐` +
+      '\n\n/revenue sync — обойти узлы прямо сейчас',
+  );
+});
+
 // Админ присылает медиа → бот возвращает file_id (чтобы вставить в .env как видео-инструкцию).
 bot.on(['message:video', 'message:animation', 'message:document', 'message:photo'], async (ctx) => {
   if (!config.adminIds.includes(ctx.from?.id ?? -1)) return;
@@ -166,6 +211,23 @@ async function monitorNodes(): Promise<void> {
   }
 }
 setInterval(() => void monitorNodes(), 30 * 60 * 1000);
+
+// Сбор выручки узлов: раз в 6 часов молча читаем subs.json каждого узла.
+//
+// Почему регулярно, а не по запросу: узел может почистить файл, потерять сервер
+// или переустановить бота — увиденная продажа остаётся в базе станка навсегда.
+// Раз в 6 часов, а не раз в сутки: так пропажа сервера отнимает максимум
+// несколько продаж, а не целый день.
+async function collectRevenue(): Promise<void> {
+  for (const n of getReadyNodes()) {
+    const r = await syncNode(n);
+    if (r.ok && r.added > 0) {
+      await notifyAdmins(bot.api, `💰 Узел #${n.id} (@${n.tg_username ?? n.server_ip}): +${r.added} продаж. /revenue`);
+    }
+  }
+}
+setInterval(() => void collectRevenue(), 6 * 60 * 60 * 1000);
+void collectRevenue(); // первый заход сразу при старте
 
 await bot.start({
   onStart: (info) => console.log(`Станок-бот @${info.username} запущен`),
