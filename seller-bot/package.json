@@ -1,6 +1,6 @@
 {
   "name": "seller-bot",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "description": "Бот-продавец: продаёт VPN за Telegram Stars (Фаза 3). Ставится на сервер узла.",
@@ -13,6 +13,7 @@
   "dependencies": {
     "dotenv": "^16.4.7",
     "grammy": "^1.30.0",
+    "node-ssh": "^13.2.1",
     "qrcode": "^1.5.4"
   },
   "devDependencies": {
