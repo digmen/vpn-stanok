@@ -1,5 +1,6 @@
 import { Bot, InlineKeyboard } from 'grammy';
 import { config } from './config.js';
+import { promoEnabled } from './branding.js';
 import { createVpnPeer, createVpnPeersEverywhere, revokePeerAt, type Peer } from './vpn.js';
 import { activeClients, addSubscription, getExpiredPeers, removePeer, revenueStars } from './subscriptions.js';
 import { offerConfig, offerConfigs, registerDeliveryHandlers } from './delivery.js';
@@ -69,8 +70,10 @@ function mainMenu(owner: boolean, userId?: number): { text: string; kb: InlineKe
   if (s.trial.enabled && userId !== undefined && !hasUsedTrial(userId) && !owner) {
     kb.text(`🎁 Попробовать бесплатно (${s.trial.days} дн.)`, 'trial').row();
   }
-  kb.text('📱 Установить приложение', 'apps').row();
-  kb.url('💰 Заработай на своём VPN так же', config.stanokUrl);
+  kb.text('📱 Установить приложение', 'apps');
+  // Каждая следующая кнопка своей строкой, но без пустых строк, если промо снято
+  // (см. branding.ts): пустой ряд Telegram рисует как щель в меню.
+  if (promoEnabled()) kb.row().url('💰 Заработай на своём VPN так же', config.stanokUrl);
   if (owner) kb.row().text('⚙️ Мой бот', 'admin');
 
   const text =
