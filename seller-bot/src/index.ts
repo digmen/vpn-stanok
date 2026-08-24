@@ -1,4 +1,4 @@
-import { Bot, InlineKeyboard } from 'grammy';
+import { Bot, InlineKeyboard, Keyboard } from 'grammy';
 import { config } from './config.js';
 import { promoEnabled } from './branding.js';
 import { createVpnPeer, createVpnPeersEverywhere, revokePeerAt, type Peer } from './vpn.js';
@@ -61,30 +61,47 @@ function ask(kind: PendingKind, arg?: string): InlineKeyboard {
   return new InlineKeyboard().text('❌ Отмена', 'cancel');
 }
 
-// ── меню клиента ──────────────────────────────────────────────────────────
-function mainMenu(owner: boolean, userId?: number): { text: string; kb: InlineKeyboard } {
+// ── меню клиента: постоянная панель кнопок (reply-клавиатура) ──────────────
+// Просьба франчайзи (Александр, 25.08): «панель кнопок, типо старт — писать
+// команды неудобно, клиентам так проще». Раньше меню было inline ВНУТРИ
+// сообщения: пролистал чат — и чтобы вернуться, набирай /start. Теперь панель
+// висит внизу постоянно, команды не нужны. Дефолт для ВСЕХ ботов-продавцов
+// (полезно каждому), не флаг на один бот — раскатается self-update'ом.
+function welcomeText(): string {
   const s = getSettings();
-  const kb = new InlineKeyboard();
-  for (const p of s.packages) kb.text(`🛒 ${packageLabel(p)}`, `buy:${p.id}`).row();
-
-  if (s.trial.enabled && userId !== undefined && !hasUsedTrial(userId) && !owner) {
-    kb.text(`🎁 Попробовать бесплатно (${s.trial.days} дн.)`, 'trial').row();
-  }
-  kb.text('📱 Установить приложение', 'apps');
-  // Каждая следующая кнопка своей строкой, но без пустых строк, если промо снято
-  // (см. branding.ts): пустой ряд Telegram рисует как щель в меню.
-  if (promoEnabled()) kb.row().url('💰 Заработай на своём VPN так же', config.stanokUrl);
-  if (owner) kb.row().text('⚙️ Мой бот', 'admin');
-
-  const text =
+  return (
     s.welcome.text ??
     'Быстрый VPN за ⭐️ Telegram Stars.\n\n' +
-      'Выбери срок — после оплаты пришлю ключ для приложения AmneziaVPN.' +
-      (s.trial.enabled ? '\n\nЕсть бесплатный пробный период — кнопка ниже.' : '');
-  return { text, kb };
+      'Выбери срок кнопкой ниже — после оплаты пришлю ключ для приложения AmneziaVPN.' +
+      (s.trial.enabled ? '\n\nЕсть бесплатный пробный период — кнопка ниже.' : '')
+  );
 }
 
-// Последнее меню в чате — удаляем старое при новом /start (чат не засоряется).
+function buyButtonText(p: Parameters<typeof packageLabel>[0]): string {
+  return `🛒 ${packageLabel(p)}`;
+}
+
+// Панель клиента: по кнопке на тариф, «попробовать», приложение, помощь;
+// владельцу — вход в кабинет. resized — нормальная высота, persistent — панель
+// не сворачивается после нажатия (то самое «всегда под рукой»).
+function clientKeyboard(owner: boolean, userId?: number): Keyboard {
+  const s = getSettings();
+  const kb = new Keyboard();
+  for (const p of s.packages) kb.text(buyButtonText(p)).row();
+  if (s.trial.enabled && userId !== undefined && !hasUsedTrial(userId) && !owner) {
+    kb.text(`🎁 Попробовать бесплатно (${s.trial.days} дн.)`).row();
+  }
+  kb.text('📱 Установить приложение').text('❓ Помощь').row();
+  // Промо-кнопка франшизы — reply-панель не умеет URL-кнопки, поэтому это
+  // текст-кнопка, по которой бот присылает ссылку на станок (см. hears ниже).
+  // Та же защита white-label, что была у inline-версии (branding.ts): у
+  // оплативших снятие промо её нет.
+  if (promoEnabled()) kb.text('💰 Заработай на своём VPN так же').row();
+  if (owner) kb.text('⚙️ Мой бот').row();
+  return kb.resized().persistent();
+}
+
+// Последнее приветствие в чате — удаляем старое при новом /start (не копим).
 const lastMenu = new Map<number, number>();
 
 async function showMenu(ctx: any): Promise<void> {
@@ -93,7 +110,8 @@ async function showMenu(ctx: any): Promise<void> {
   const prev = lastMenu.get(chatId);
   if (prev) await ctx.api.deleteMessage(chatId, prev).catch(() => {});
 
-  const { text, kb } = mainMenu(isOwner(ctx.from?.id), ctx.from?.id);
+  const kb = clientKeyboard(isOwner(ctx.from?.id), ctx.from?.id);
+  const text = welcomeText();
   const m = s.welcome.photo
     ? await ctx.replyWithPhoto(s.welcome.photo, { caption: text, reply_markup: kb }).catch(() => null)
     : null;
@@ -114,9 +132,24 @@ bot.callbackQuery('menu', async (ctx) => {
   await showMenu(ctx);
 });
 
+async function sendApps(ctx: any): Promise<void> {
+  await ctx.reply(APP_LINKS, { link_preview_options: { is_disabled: true } });
+}
+
+const HELP_TEXT =
+  '❓ Как это работает:\n\n' +
+  '1. Выбери срок кнопкой 🛒 и оплати звёздами Telegram.\n' +
+  '2. Пришлю ключ — открой его в приложении AmneziaVPN (кнопка 📱 «Установить приложение»).\n' +
+  '3. Готово, VPN работает. Ключ можно переключать между странами прямо в приложении.\n\n' +
+  'Если ключ не пришёл или что-то не так — напиши сюда же, владелец бота поможет.';
+
+async function sendHelp(ctx: any): Promise<void> {
+  await ctx.reply(HELP_TEXT, { link_preview_options: { is_disabled: true } });
+}
+
 bot.callbackQuery('apps', async (ctx) => {
   await ctx.answerCallbackQuery();
-  await ctx.reply(APP_LINKS, { link_preview_options: { is_disabled: true } });
+  await sendApps(ctx);
 });
 
 bot.callbackQuery('cancel', async (ctx) => {
@@ -126,13 +159,7 @@ bot.callbackQuery('cancel', async (ctx) => {
 });
 
 // ── покупка ───────────────────────────────────────────────────────────────
-bot.callbackQuery(/^buy:(.+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
-  const pkg = findPackage(ctx.match[1]);
-  if (!pkg) {
-    await ctx.reply('Этот тариф больше не действует — нажми /start и выбери заново.');
-    return;
-  }
+async function sendInvoice(ctx: any, pkg: NonNullable<ReturnType<typeof findPackage>>): Promise<void> {
   await ctx.replyWithInvoice(
     'VPN-доступ',
     `Доступ к VPN на ${pkg.days} дней`,
@@ -140,6 +167,18 @@ bot.callbackQuery(/^buy:(.+)$/, async (ctx) => {
     'XTR', // Telegram Stars
     [{ label: `VPN ${pkg.days} дн.`, amount: pkg.stars }],
   );
+}
+
+// inline-кнопка покупки остаётся для совместимости (старые сообщения в чатах);
+// основной путь теперь — кнопка на панели (см. bot.hears(/^🛒 /) ниже).
+bot.callbackQuery(/^buy:(.+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const pkg = findPackage(ctx.match[1]);
+  if (!pkg) {
+    await ctx.reply('Этот тариф больше не действует — нажми /start и выбери заново.');
+    return;
+  }
+  await sendInvoice(ctx, pkg);
 });
 
 bot.on('pre_checkout_query', async (ctx) => {
@@ -164,8 +203,7 @@ bot.on('message:successful_payment', async (ctx) => {
 });
 
 // ── пробный период ────────────────────────────────────────────────────────
-bot.callbackQuery('trial', async (ctx) => {
-  await ctx.answerCallbackQuery();
+async function giveTrial(ctx: any): Promise<void> {
   const s = getSettings();
   const userId = ctx.from?.id;
   if (!s.trial.enabled || userId === undefined) return;
@@ -187,6 +225,11 @@ bot.callbackQuery('trial', async (ctx) => {
   });
   await offerConfig(ctx.api, ctx.chat!.id, peer.config, peer.locTitle);
   await ctx.reply(`🎁 Пробный доступ на ${s.trial.days} дн. активен. Приложение — кнопка «Установить приложение».`);
+}
+
+bot.callbackQuery('trial', async (ctx) => {
+  await ctx.answerCallbackQuery();
+  await giveTrial(ctx);
 });
 
 // ── кабинет владельца ─────────────────────────────────────────────────────
@@ -209,15 +252,20 @@ function adminMenu(): InlineKeyboard {
     .text('← В меню', 'menu');
 }
 
-async function showAdmin(ctx: any, note?: string): Promise<void> {
+function adminText(note?: string): string {
   const s = getSettings();
-  const text =
+  return (
     '⚙️ Настройки твоего бота\n\n' +
     `Тарифов: ${s.packages.length}\n` +
     `Пробный период: ${s.trial.enabled ? `включён, ${s.trial.days} дн.` : 'выключен'}\n` +
     `Приветствие: ${s.welcome.text ? 'своё' : 'стандартное'}${s.welcome.photo ? ' + фото' : ''}\n` +
     `Версия бота: ${currentVersion()}` +
-    (note ? `\n\n${note}` : '');
+    (note ? `\n\n${note}` : '')
+  );
+}
+
+async function showAdmin(ctx: any, note?: string): Promise<void> {
+  const text = adminText(note);
   await ctx.editMessageText(text, { reply_markup: adminMenu() }).catch(async () => {
     await ctx.reply(text, { reply_markup: adminMenu() });
   });
@@ -512,6 +560,44 @@ bot.callbackQuery('free', async (ctx) => {
 bot.command('stats', async (ctx) => {
   if (!isOwner(ctx.from?.id)) return;
   await ctx.reply(await buildStats());
+});
+
+// ── нажатия панели кнопок (reply-клавиатура) ──────────────────────────────
+// Регистрируются ДО обработчика ввода владельца ниже: bot.hears терминален,
+// поэтому нажатие панели не «съедается» ожиданием ввода. Клиентские кнопки
+// НЕ трогают pending (это глобальное состояние ввода ВЛАДЕЛЬЦА — обнулять его
+// нажатием клиента нельзя); pending чистит только вход в кабинет владельца.
+bot.hears('📱 Установить приложение', (ctx) => sendApps(ctx));
+bot.hears('❓ Помощь', (ctx) => sendHelp(ctx));
+
+bot.hears('💰 Заработай на своём VPN так же', async (ctx) => {
+  if (!promoEnabled()) return; // white-label: у оплативших промо нет
+  await ctx.reply(`💰 Свой такой же VPN-бот и заработок на нём — здесь:\n${config.stanokUrl}`, {
+    link_preview_options: { is_disabled: true },
+  });
+});
+
+bot.hears('⚙️ Мой бот', async (ctx) => {
+  if (!isOwner(ctx.from?.id)) return;
+  pending = null;
+  await ctx.reply(adminText(), { reply_markup: adminMenu() });
+});
+
+bot.hears(/^🎁 /, async (ctx) => {
+  await giveTrial(ctx);
+});
+
+bot.hears(/^🛒 /, async (ctx) => {
+  // Тариф ищем по точному тексту кнопки на текущий момент: цены/сроки могли
+  // измениться (владелец правил), тогда старая надпись не найдётся — покажем
+  // свежее меню, а не выставим неверный счёт.
+  const text = ctx.message?.text;
+  const pkg = text ? getSettings().packages.find((p) => buyButtonText(p) === text) : undefined;
+  if (!pkg) {
+    await showMenu(ctx);
+    return;
+  }
+  await sendInvoice(ctx, pkg);
 });
 
 // ── ввод владельца (текст и фото) ─────────────────────────────────────────
