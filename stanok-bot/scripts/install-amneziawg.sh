@@ -7,6 +7,32 @@ SERVER_IP="${1:?Нужен публичный IP сервера первым а�
 INSTALLER=/root/amneziawg-install.sh
 
 export DEBIAN_FRONTEND=noninteractive
+
+# Свежий VPS почти всегда занят unattended-upgrades первые минуты после старта:
+# он держит dpkg-lock, и любой наш apt падает с "Unable to acquire the dpkg
+# frontend lock". Это НЕ ошибка сервера — фоновый апдейт надо переждать, а не
+# ронять провижининг (грабля из чек-листа server-bringup). Реальный случай:
+# узел #8 (45.148.116.120) упал ровно на этом 24.08. Ждём до 10 минут, потом
+# честно объясняем человеку, а не отдаём криптическое сообщение apt.
+wait_for_apt() {
+  local waited=0 max=600
+  while :; do
+    if command -v fuser >/dev/null 2>&1; then
+      fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock >/dev/null 2>&1 || break
+    else
+      pgrep -f 'unattended-upgrade|apt-get|/usr/bin/dpkg' >/dev/null 2>&1 || break
+    fi
+    if [ "$waited" -ge "$max" ]; then
+      echo "apt/dpkg занят другим процессом (скорее всего unattended-upgrades) дольше ${max}с — сервер только создан и ещё доустанавливает обновления. Подожди 5-10 минут и запусти установку снова." >&2
+      exit 1
+    fi
+    echo "apt занят фоновым обновлением системы, жду… (${waited}с)" >&2
+    sleep 10
+    waited=$((waited + 10))
+  done
+}
+
+wait_for_apt
 command -v curl >/dev/null 2>&1 || { apt-get update -y >/dev/null && apt-get install -y curl >/dev/null; }
 
 if [ ! -x "$INSTALLER" ]; then
@@ -57,7 +83,10 @@ if [ -r "$OS_RELEASE" ]; then
 fi
 
 # Установка (idempotent). AUTO_INSTALL создаёт сервер и первого клиента.
+# Апстрим-установщик сам делает apt — ещё раз убеждаемся, что lock свободен
+# (фоновый апдейт мог стартовать в окне между первой проверкой и этим местом).
 if ! command -v awg >/dev/null 2>&1; then
+  wait_for_apt
   AUTO_INSTALL=y SERVER_PUB_IP="$SERVER_IP" bash "$INSTALLER"
 fi
 
