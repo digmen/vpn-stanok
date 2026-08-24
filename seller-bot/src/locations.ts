@@ -39,7 +39,10 @@ export interface Location {
 }
 
 export const LOCATION_LIMITS = {
-  MAX_REMOTE: 5,
+  // Практически «сколько угодно» для одного продавца — было 5, подняли по
+  // просьбе (25.08). Не бесконечность: верхняя граница нужна генератору id ниже
+  // (nextLocationId перебирает l2..lN) и как защита от случайного спама.
+  MAX_REMOTE: 50,
   MAX_TITLE_LEN: 24,
 } as const;
 
@@ -170,6 +173,24 @@ export function removeRemote(id: string): boolean {
   } catch {
     /* ключа уже нет — не страшно */
   }
+  return true;
+}
+
+/**
+ * Меняет адрес (IP/host, при необходимости SSH-порт) существующей локации,
+ * сохраняя ключ доступа и название. Нужно, когда у сервера сменился IP — у этих
+ * VPS это обычное дело: раньше приходилось удалять и заводить заново. Ключ на
+ * сервере (та же машина, новый IP) переживает смену адреса, поэтому доступ
+ * сохраняется. Порт убираем, если снова стандартный 22.
+ */
+export function updateRemoteHost(id: string, host: string, port?: number): boolean {
+  const list = readRemotes();
+  const row = list.find((r) => r.id === id);
+  if (!row) return false;
+  row.host = host;
+  if (port && port !== 22) row.port = port;
+  else delete row.port;
+  writeRemotes(list);
   return true;
 }
 

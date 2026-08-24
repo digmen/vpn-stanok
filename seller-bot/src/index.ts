@@ -16,6 +16,7 @@ import {
   removeRemote,
   renameLocation,
   saveKey,
+  updateRemoteHost,
 } from './locations.js';
 import { attachServer, ping } from './ssh.js';
 import { claimOwnerIfUnset, getOwnerId } from './owner.js';
@@ -49,7 +50,7 @@ type PendingKind =
   | 'pkg-price' | 'pkg-days' | 'pkg-new-days' | 'pkg-new-stars'
   | 'welcome-text' | 'welcome-photo' | 'trial-days'
   // Добавление локации: сначала адрес, потом пароль, потом название
-  | 'loc-host' | 'loc-password' | 'loc-title' | 'loc-rename';
+  | 'loc-host' | 'loc-password' | 'loc-title' | 'loc-rename' | 'loc-editip';
 let pending: { kind: PendingKind; arg?: string; at: number } | null = null;
 const PROMPT_TTL_MS = 180_000;
 
@@ -473,7 +474,10 @@ bot.callbackQuery(/^loc:(.+)$/, async (ctx) => {
   const loc = findLocation(ctx.match[1]);
   if (!loc) return;
   const kb = new InlineKeyboard().text('✏️ Переименовать', `locren:${loc.id}`);
-  if (loc.kind !== 'local') kb.text('🗑 Убрать', `locdel:${loc.id}`);
+  if (loc.kind !== 'local') {
+    kb.text('🌐 Сменить IP', `locip:${loc.id}`).row();
+    kb.text('🗑 Убрать', `locdel:${loc.id}`);
+  }
   kb.row().text('← Назад', 'locs');
 
   let status = 'это сервер, на котором работает сам бот';
@@ -495,6 +499,21 @@ bot.callbackQuery(/^locren:(.+)$/, async (ctx) => {
   await ctx.reply(`Пришли новое название для «${loc.title}». Его увидят клиенты — пиши страну или город.`, {
     reply_markup: ask('loc-rename', loc.id),
   });
+});
+
+bot.callbackQuery(/^locip:(.+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!isOwner(ctx.from?.id)) return;
+  const loc = findLocation(ctx.match[1]);
+  if (!loc || loc.kind !== 'ssh') return;
+  await ctx.reply(
+    `🌐 Новый адрес для «${loc.title}».\n\n` +
+      `Сейчас: ${loc.remote!.host}${loc.remote!.port ? ':' + loc.remote!.port : ''}\n\n` +
+      'Пришли новый IP (или IP:порт, если SSH не на 22). Ключ доступа сохранится — ' +
+      'если это та же машина с новым IP, всё продолжит работать, и новые конфиги сразу ' +
+      'пойдут с правильным адресом.',
+    { reply_markup: ask('loc-editip', loc.id) },
+  );
 });
 
 bot.callbackQuery(/^locdel:(.+)$/, async (ctx) => {
@@ -712,6 +731,50 @@ bot.on('message:text', async (ctx) => {
     pending = null;
     renameLocation(arg!, text);
     await ctx.reply(`✅ Локация теперь называется «${text.trim().slice(0, LOCATION_LIMITS.MAX_TITLE_LEN)}».`);
+    return;
+  }
+
+  if (kind === 'loc-editip') {
+    const parsed = parseHostPort(text);
+    if (!parsed) {
+      await ctx.reply('❌ Это не похоже на адрес. Пришли IP или IP:порт, например 203.0.113.10 или 203.0.113.10:2222.');
+      return;
+    }
+    const loc = findLocation(arg!);
+    if (!loc || loc.kind !== 'ssh') {
+      pending = null;
+      await ctx.reply('Локация не найдена.');
+      return;
+    }
+    pending = null;
+    const wait = await ctx.reply('⏳ Проверяю доступ по новому адресу…');
+    // Пингуем НОВЫЙ адрес СТАРЫМ ключом: если это та же машина с новым IP,
+    // ключ в её authorized_keys сохранился и доступ есть — тогда меняем адрес.
+    // Если ключ не подошёл, это, вероятно, другой сервер — обновлять адрес на
+    // недоступный нельзя, честнее попросить пере-добавить с паролем.
+    const probe = { ...loc.remote!, host: parsed.host, port: parsed.port };
+    const alive = await ping(probe);
+    if (!alive) {
+      await ctx.api
+        .editMessageText(
+          ctx.chat.id,
+          wait.message_id,
+          `❌ По адресу ${parsed.host} сервер не отвечает нашим ключом.\n\n` +
+            'Если это ТА ЖЕ машина с новым IP — проверь, что сервер включён и IP верный, и попробуй снова.\n' +
+            'Если это ДРУГОЙ сервер — убери эту локацию и добавь заново (нужен root-пароль, чтобы поставить ключ).',
+        )
+        .catch(() => {});
+      return;
+    }
+    updateRemoteHost(loc.id, parsed.host, parsed.port);
+    await ctx.api
+      .editMessageText(
+        ctx.chat.id,
+        wait.message_id,
+        `✅ Адрес обновлён: ${parsed.host}${parsed.port ? ':' + parsed.port : ''}. Сервер отвечает.\n\n` +
+          'Новые конфиги пойдут уже с этим адресом. Старые (со старым IP) не оживут — выдай клиентам свежие.',
+      )
+      .catch(() => {});
     return;
   }
 

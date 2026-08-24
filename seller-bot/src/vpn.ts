@@ -3,7 +3,7 @@ import { promisify } from 'node:util';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PEER_SCRIPT_TIMEOUT_MS } from './constants.js';
-import { extractClientConfig } from './parse.js';
+import { extractClientConfig, withEndpointHost } from './parse.js';
 import { allLocations, findLocation, PRIMARY_LOCATION_ID, type Location } from './locations.js';
 import { runScript } from './ssh.js';
 
@@ -44,7 +44,13 @@ export async function createVpnPeerAt(loc: Location): Promise<Peer> {
         ? (await execFileP('bash', [ADD_SCRIPT], { timeout: PEER_SCRIPT_TIMEOUT_MS })).stdout
         : await runScript(loc.remote!, ADD_SCRIPT, [], PEER_SCRIPT_TIMEOUT_MS);
     const { config, pubkey } = parsePeerOutput(stdout);
-    return { config, pubkey, loc: loc.id, locTitle: loc.title };
+    // Endpoint берём из АДРЕСА ЛОКАЦИИ в боте, а не из зашитого на сервере
+    // SERVER_PUB_IP (общий фикс бага 25.08, см. withEndpointHost). У основного
+    // сервера отдельного адреса в боте нет — там оставляем как пришло (его IP
+    // стабилен, на нём и живёт сам бот).
+    const host = loc.kind === 'ssh' ? loc.remote?.host : undefined;
+    const finalConfig = host ? withEndpointHost(config, host) : config;
+    return { config: finalConfig, pubkey, loc: loc.id, locTitle: loc.title };
   } catch (e: unknown) {
     throw new Error(shortError(e));
   }
