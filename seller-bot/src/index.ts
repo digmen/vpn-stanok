@@ -1,7 +1,7 @@
 import { Bot, InlineKeyboard, Keyboard } from 'grammy';
 import { config } from './config.js';
 import { promoEnabled } from './branding.js';
-import { createVpnPeer, createVpnPeersEverywhere, revokePeerAt, type Peer } from './vpn.js';
+import { createVpnPeer, createVpnPeerAt, createVpnPeersEverywhere, revokePeerAt, type Peer } from './vpn.js';
 import { activeClients, addSubscription, getExpiredPeers, removePeer, revenueStars } from './subscriptions.js';
 import { offerConfig, offerConfigs, registerDeliveryHandlers } from './delivery.js';
 import {
@@ -556,22 +556,43 @@ bot.callbackQuery('updgo', async (ctx) => {
   startSelfUpdate();
 });
 
-// Владелец берёт бесплатный доступ — один постоянный конфиг (без новых пиров на каждый клик)
+// Владелец берёт бесплатный доступ — по конфигу на КАЖДУЮ локацию (не только
+// primary), постоянному, без новых пиров на каждый клик.
+//
+// 🔴 Фикс 26.08: раньше это жёстко звало createVpnPeer() без аргумента —
+// та всегда возвращает primary (см. vpn.ts::createVpnPeer, «совместимость
+// со старым вызовом»). Владелец физически не мог получить через «Мой VPN»
+// ни одной доп. локации, даже рабочей — только вечно один и тот же primary,
+// закешированный в единственном файле. Поймано на живом узле (Александр,
+// пытался проверить «Амстердам», кнопка молча подсовывала primary).
 bot.callbackQuery('free', async (ctx) => {
   await ctx.answerCallbackQuery();
   if (!isOwner(ctx.from?.id)) return;
   const chatId = ctx.chat!.id;
 
-  const existing = readOwnerConfig();
-  if (existing) {
-    await offerConfig(ctx.api, chatId, existing);
-    return;
+  const toSend: { config: string; title: string }[] = [];
+  const failed: { title: string; reason: string }[] = [];
+  for (const loc of allLocations()) {
+    const existing = readOwnerConfig(loc.id);
+    if (existing) {
+      toSend.push({ config: existing, title: loc.title });
+      continue;
+    }
+    try {
+      const peer = await createVpnPeerAt(loc);
+      saveOwnerConfig(loc.id, peer.config);
+      toSend.push({ config: peer.config, title: peer.locTitle });
+    } catch (e) {
+      failed.push({ title: loc.title, reason: e instanceof Error ? e.message : String(e) });
+    }
   }
-  const peer = await generate(ctx.api, chatId);
-  if (peer) {
-    saveOwnerConfig(peer.config);
-    recordEvent({ type: 'free', userId: getOwnerId() });
-    await offerConfig(ctx.api, chatId, peer.config);
+  if (toSend.length === 0) return;
+  recordEvent({ type: 'free', userId: getOwnerId() });
+  await offerConfigs(ctx.api, chatId, toSend);
+  if (failed.length > 0) {
+    await ctx.reply(
+      '⚠️ Не выдал конфиг для: ' + failed.map((f) => `${f.title} (${f.reason})`).join(', '),
+    );
   }
 });
 

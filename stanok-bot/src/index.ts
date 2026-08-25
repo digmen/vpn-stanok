@@ -125,8 +125,11 @@ bot.command('nodes', async (ctx) => {
   }
   const lines = await Promise.all(
     nodes.map(async (n) => {
-      const up = n.status === 'ready' ? await checkNodeAlive(n.server_ip, decrypt(n.root_password_enc)) : false;
-      return `#${n.id} ${up ? '🟢' : '🔴'} ${n.server_ip} · ${n.status} · @${n.tg_username ?? '—'}`;
+      const health =
+        n.status === 'ready'
+          ? await checkNodeAlive(n.server_ip, decrypt(n.root_password_enc), !!n.is_primary)
+          : { ok: false, detail: 'status ≠ ready' };
+      return `#${n.id} ${health.ok ? '🟢' : '🔴'} ${n.server_ip} · ${n.status} · @${n.tg_username ?? '—'}${health.ok ? '' : ` · ${health.detail}`}`;
     }),
   );
   await ctx.reply('Узлы:\n' + lines.join('\n'));
@@ -200,11 +203,14 @@ process.once('SIGTERM', () => bot.stop());
 const offlineNodes = new Set<number>();
 async function monitorNodes(): Promise<void> {
   for (const n of getReadyNodes()) {
-    const up = await checkNodeAlive(n.server_ip, decrypt(n.root_password_enc));
-    if (!up && !offlineNodes.has(n.id)) {
+    const health = await checkNodeAlive(n.server_ip, decrypt(n.root_password_enc), !!n.is_primary);
+    if (!health.ok && !offlineNodes.has(n.id)) {
       offlineNodes.add(n.id);
-      await notifyAdmins(bot.api, `🔴 Узел #${n.id} (${n.server_ip}, @${n.tg_username ?? '—'}) недоступен.`);
-    } else if (up && offlineNodes.has(n.id)) {
+      await notifyAdmins(
+        bot.api,
+        `🔴 Узел #${n.id} (${n.server_ip}, @${n.tg_username ?? '—'}) недоступен: ${health.detail}`,
+      );
+    } else if (health.ok && offlineNodes.has(n.id)) {
       offlineNodes.delete(n.id);
       await notifyAdmins(bot.api, `🟢 Узел #${n.id} (${n.server_ip}) снова онлайн.`);
     }

@@ -1,6 +1,15 @@
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { NodeSSH } from 'node-ssh';
 import { REMOTE, SSH } from './constants.js';
 import { extractClientConfig } from './parse.js';
+import { testHandshake } from './handshake-test.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+// Скрипты выдачи/отзыва пира живут в seller-bot (сосед по репозиторию на
+// станке — deploy.yml заливает оба каталога рядом), а не дублируются здесь.
+const ADD_PEER_SCRIPT = path.resolve(__dirname, '../../seller-bot/scripts/add-amneziawg-peer.sh');
+const REVOKE_PEER_SCRIPT = path.resolve(__dirname, '../../seller-bot/scripts/revoke-amneziawg-peer.sh');
 
 export interface RemoteInstallOptions {
   host: string;
@@ -45,10 +54,34 @@ export async function runRemoteInstall(opts: RemoteInstallOptions): Promise<stri
   }
 }
 
-// Реальная проверка здоровья узла: жив ли процесс бота-продавца И поднят ли VPN-интерфейс.
-// Порт 22 сам по себе этого не показывает (сервер жив ≠ сервис жив).
-export async function checkNodeAlive(host: string, password: string): Promise<boolean> {
+export interface NodeHealth {
+  ok: boolean;
+  detail: string;
+}
+
+// Реальная проверка здоровья узла — не «процесс жив», а «VPN реально принимает
+// подключение», настоящим handshake со станка (та же техника, что и в
+// provision.ts при установке, см. handshake-test.ts).
+//
+// 🔴 Фикс 26.08 — прошлая версия звала `pm2 pid seller-bot && awg show awg0`.
+// Оба условия оказались фиктивными для вторичных локаций:
+// 1. `pm2 pid <имя>` возвращает код 0 (успех) даже когда такого процесса
+//    вовсе нет — проверено делом. Значит первая половина проверки не могла
+//    провалиться никогда, ни для одного узла.
+// 2. Вторичные локации (доп. серверы того же владельца) в принципе НЕ
+//    запускают свой seller-bot — это архитектурно (см. attach-location.ts):
+//    пиры на них выдаёт primary по SSH. Требовать там процесс — требовать
+//    того, чего там не может быть по дизайну.
+// Итог: мониторинг физически не мог заметить проблему ни на одной
+// вторичной локации, только на primary — ровно узел «Амстердам» из живого
+// инцидента 25→26.08 ни разу не попал в алерты, хотя был проблемным.
+//
+// `isPrimary` — единственное, что теперь по-разному проверяется для primary
+// (он же должен реально держать процесс бота) и вторичных локаций (они его
+// не имеют по дизайну — не спрашиваем).
+export async function checkNodeAlive(host: string, password: string, isPrimary: boolean): Promise<NodeHealth> {
   const ssh = new NodeSSH();
+  let clientPubkey: string | undefined;
   try {
     await ssh.connect({
       host,
@@ -58,11 +91,45 @@ export async function checkNodeAlive(host: string, password: string): Promise<bo
       readyTimeout: SSH.READY_TIMEOUT_MS,
       tryKeyboard: true,
     });
-    const res = await ssh.execCommand('pm2 pid seller-bot >/dev/null 2>&1 && awg show awg0 >/dev/null 2>&1 && echo OK');
-    return res.stdout.trim() === 'OK';
-  } catch {
-    return false;
+
+    if (isPrimary) {
+      // Числовой pid, а не голый код возврата — pm2 молчит с кодом 0 и на
+      // несуществующее имя процесса, само по себе это ничего не доказывает.
+      const pidRes = await ssh.execCommand('pm2 pid seller-bot');
+      if (!/^\d+$/.test(pidRes.stdout.trim())) {
+        return { ok: false, detail: 'процесс seller-bot не запущен (pm2 pid пуст)' };
+      }
+    }
+
+    const remotePath = '/tmp/health-add-peer.sh';
+    await ssh.putFile(ADD_PEER_SCRIPT, remotePath);
+    const addRes = await ssh.execCommand(`bash ${remotePath}`);
+    if (addRes.code !== 0) {
+      return { ok: false, detail: 'не удалось выдать тестовый пир: ' + (addRes.stderr || addRes.stdout).slice(0, 200) };
+    }
+    const config = extractClientConfig(addRes.stdout);
+    const pkMatch = addRes.stdout.match(/###CLIENT_PUBKEY###(.+)/);
+    clientPubkey = pkMatch?.[1]?.trim();
+    if (!config) {
+      return { ok: false, detail: 'скрипт выдачи не вернул конфиг' };
+    }
+
+    const hs = await testHandshake(config, 8000);
+    return hs;
+  } catch (e) {
+    return { ok: false, detail: e instanceof Error ? e.message : String(e) };
   } finally {
+    if (clientPubkey) {
+      // Подчищаем тестового пира, чтобы мониторинг не копил мусор в конфиге
+      // узла — молча, ошибка отзыва не должна портить результат проверки.
+      try {
+        const revokePath = '/tmp/health-revoke-peer.sh';
+        await ssh.putFile(REVOKE_PEER_SCRIPT, revokePath);
+        await ssh.execCommand(`bash ${revokePath} ${shellQuote(clientPubkey)}`);
+      } catch {
+        /* не критично — переживёт мусорную запись до следующей ревокации */
+      }
+    }
     ssh.dispose();
   }
 }
