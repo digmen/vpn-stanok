@@ -1,8 +1,8 @@
 import type { Conversation, ConversationFlavor } from '@grammyjs/conversations';
 import { InlineKeyboard, type Context } from 'grammy';
 import { config } from './config.js';
-import { encrypt } from './crypto.js';
-import { findNodeByIpOfOtherUser, upsertNode } from './db.js';
+import { decrypt, encrypt } from './crypto.js';
+import { findNodeByIpOfOtherUser, getPrimaryReadyNode, upsertNode } from './db.js';
 import { logEvent, type FunnelStep, type SideStep } from './events.js';
 import { checkSshPort, preflightMessage } from './preflight.js';
 import { checkIp, ipProblemMessage, isNonEmptySecret, isValidBotToken } from './validate.js';
@@ -149,11 +149,23 @@ async function ipThatAnswers(
   }
 }
 
-// Диалог онбординга: IP → проверка связи → root-пароль → токен бота-продавца.
+// Диалог онбординга: IP → проверка связи → root-пароль → [токен бота-продавца, только
+// если это ПЕРВЫЙ сервер владельца].
+//
+// 🔴 Общий фикс бага 25.08 (ловили дважды на живом клиенте, Германия и потом Амстердам):
+// раньше шаг с токеном был ОБЯЗАТЕЛЬНЫМ всегда, и владелец, заводя ВТОРОЙ сервер, вводил
+// тот же токен от того же бота (он-то один!) — станок послушно разворачивал ВТОРУЮ копию
+// бота-продавца с тем же токеном, и они дрались за getUpdates (409 Conflict, crash-loop).
+// Теперь: если у владельца уже есть готовый (ready) primary-узел — токен вообще не
+// спрашиваем, а новый сервер после провижининга уходит не в deploySeller, а в
+// attachLocationToPrimary (см. provision.ts) — становится ДОПОЛНИТЕЛЬНОЙ локацией внутри
+// уже работающего бота, без второго процесса.
 export async function onboarding(conversation: MyConversation, ctx: MyContext) {
   const from = ctx.from!;
   const track: Track = (step, detail) =>
     conversation.external(() => logEvent({ id: from.id, username: from.username }, step, detail));
+
+  const primary = await conversation.external(() => getPrimaryReadyNode(from.id));
 
   const ip = await ipThatAnswers(conversation, ctx, from.id, track);
 
@@ -165,15 +177,24 @@ export async function onboarding(conversation: MyConversation, ctx: MyContext) {
   });
   await track('password_ok'); // сам пароль в журнал не попадает — только факт
 
-  const sellerToken = await askStep(conversation, ctx, {
-    video: config.videos.token,
-    prompt:
-      '3️⃣ Пришли токен твоего бота-продавца.\n' +
-      'Создай бота: @BotFather → /newbot → скопируй строку вида 123456:AA...',
-    validate: (s) =>
-      isValidBotToken(s) ? null : '❌ Это не похоже на токен бота. Пример: 123456789:AAH... Пришли ещё раз:',
-  });
-  await track('token_ok');
+  // Уже есть бот → этот сервер просто добавит ему ещё одну точку выдачи VPN.
+  // Токен НЕ спрашиваем — используем токен primary (он и так уже зашифрован в его
+  // строке, отдельно этой записи не нужен, но колонка NOT NULL — переносим тот же).
+  let sellerToken: string;
+  if (primary) {
+    sellerToken = decrypt(primary.seller_token_enc);
+    await track('secondary_node');
+  } else {
+    sellerToken = await askStep(conversation, ctx, {
+      video: config.videos.token,
+      prompt:
+        '3️⃣ Пришли токен твоего бота-продавца.\n' +
+        'Создай бота: @BotFather → /newbot → скопируй строку вида 123456:AA...',
+      validate: (s) =>
+        isValidBotToken(s) ? null : '❌ Это не похоже на токен бота. Пример: 123456789:AAH... Пришли ещё раз:',
+    });
+    await track('token_ok');
+  }
 
   const id = await conversation.external(() =>
     upsertNode({
@@ -182,12 +203,16 @@ export async function onboarding(conversation: MyConversation, ctx: MyContext) {
       serverIp: ip,
       rootPasswordEnc: encrypt(rootPassword),
       sellerTokenEnc: encrypt(sellerToken),
+      isPrimary: !primary,
     }),
   );
 
   const kb = new InlineKeyboard().text('🚀 Поднять VPN', `provision:${id}`);
   await ctx.reply(
-    `✅ Данные приняты (сервер ${ip}).\nЖми «Поднять VPN» — я всё настрою сам.`,
+    primary
+      ? `✅ Данные приняты (сервер ${ip}).\nЭто будет ещё одна точка в твоём уже работающем боте — ` +
+          'отдельного бота заводить не нужно. Жми «Поднять VPN».'
+      : `✅ Данные приняты (сервер ${ip}).\nЖми «Поднять VPN» — я всё настрою сам.`,
     { reply_markup: kb },
   );
 }

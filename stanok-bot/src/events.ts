@@ -45,7 +45,10 @@ export type SideStep =
   | 'preflight_fail'
   | 'retry_click'
   | 'newip_click'
-  | 'provision_fail';
+  | 'provision_fail'
+  // Токен не спрашивали — у владельца уже есть готовый бот, этот сервер идёт
+  // доп. локацией в него (см. onboarding.ts, фикс 409 от дублей-ботов 25.08).
+  | 'secondary_node';
 
 export interface EventRow {
   id: number;

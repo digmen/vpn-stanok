@@ -2,10 +2,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { InlineKeyboard, type Api } from 'grammy';
 import { config } from './config.js';
-import { decrypt } from './crypto.js';
-import { getNodeById, setNodeStatus } from './db.js';
+import { decrypt, encrypt } from './crypto.js';
+import { getNodeById, getPrimaryReadyNode, setNodeStatus, setNodeSupportKey } from './db.js';
 import { runRemoteInstall } from './ssh.js';
 import { deploySeller, getBotUsername } from './deploy-seller.js';
+import { attachLocationToPrimary } from './attach-location.js';
 import { notifyAdmins } from './admin.js';
 import { checkSshPort, preflightMessage } from './preflight.js';
 import { logEvent } from './events.js';
@@ -67,27 +68,62 @@ export async function provisionNode(
       scriptLocalPath: SCRIPT_PATH,
       args: [node.server_ip],
     });
-    await show('✅ VPN установлен. ⚙️ Запускаю твоего бота-продавца… ещё пара минут.');
 
-    await deploySeller({
-      host: node.server_ip,
-      password,
-      sellerToken,
-      ownerId: node.tg_user_id,
-      stanokUrl: config.stanokUrl,
-      priceStars: config.sellerPriceStars,
-    });
+    if (node.is_primary) {
+      await show('✅ VPN установлен. ⚙️ Запускаю твоего бота-продавца… ещё пара минут.');
 
-    setNodeStatus(nodeId, 'ready');
-    logEvent(who, 'provision_ok', node.server_ip);
-    const uname = await getBotUsername(sellerToken);
-    const kb = uname ? new InlineKeyboard().url('🚀 Открыть моего бота', `https://t.me/${uname}`) : undefined;
-    await show(
-      '🎉 Готово! Твой VPN-бизнес запущен.\n\n' +
-        'Открой своего бота → /start → «🆓 Мой VPN» — заберёшь свой VPN там.\n' +
-        'Клиентам он продаёт VPN за ⭐️. Для подключения — приложение AmneziaVPN.',
-      kb,
-    );
+      await deploySeller({
+        host: node.server_ip,
+        password,
+        sellerToken,
+        ownerId: node.tg_user_id,
+        stanokUrl: config.stanokUrl,
+        priceStars: config.sellerPriceStars,
+      });
+
+      setNodeStatus(nodeId, 'ready');
+      logEvent(who, 'provision_ok', node.server_ip);
+      const uname = await getBotUsername(sellerToken);
+      const kb = uname ? new InlineKeyboard().url('🚀 Открыть моего бота', `https://t.me/${uname}`) : undefined;
+      await show(
+        '🎉 Готово! Твой VPN-бизнес запущен.\n\n' +
+          'Открой своего бота → /start → «🆓 Мой VPN» — заберёшь свой VPN там.\n' +
+          'Клиентам он продаёт VPN за ⭐️. Для подключения — приложение AmneziaVPN.',
+        kb,
+      );
+    } else {
+      // Доп. сервер владельца, у которого бот уже есть и работает: не второй
+      // процесс с тем же токеном (баг 25.08 — 409, дважды на живом клиенте),
+      // а новая локация ВНУТРИ уже работающего бота.
+      const primary = getPrimaryReadyNode(node.tg_user_id);
+      if (!primary) {
+        // Основной узел за это время потерялся/сломался — не молчим, а
+        // объясняем и не пытаемся приткнуть локацию в никуда.
+        throw new Error(
+          'у тебя нет ни одного готового (ready) основного сервера с ботом прямо сейчас — ' +
+            'без него некуда добавлять локацию. Подними/почини основной сервер, потом повтори.',
+        );
+      }
+      await show('✅ VPN установлен. 🔗 Добавляю сервер в твоего уже работающего бота…');
+
+      const { supportPrivateKey } = await attachLocationToPrimary({
+        newHost: node.server_ip,
+        newPassword: password,
+        primaryHost: primary.server_ip,
+        primaryPassword: decrypt(primary.root_password_enc),
+      });
+      setNodeSupportKey(nodeId, encrypt(supportPrivateKey));
+
+      setNodeStatus(nodeId, 'ready');
+      logEvent(who, 'provision_ok', node.server_ip);
+      const uname = await getBotUsername(decrypt(primary.seller_token_enc));
+      const kb = uname ? new InlineKeyboard().url('🚀 Открыть моего бота', `https://t.me/${uname}`) : undefined;
+      await show(
+        `🎉 Готово! Сервер ${node.server_ip} добавлен как ещё одна точка в твоём боте.\n\n` +
+          'Открывать его отдельно не нужно — он уже там, в списке локаций.',
+        kb,
+      );
+    }
   } catch (e) {
     setNodeStatus(nodeId, 'error');
     const msg = e instanceof Error ? e.message : String(e);

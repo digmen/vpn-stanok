@@ -18,6 +18,26 @@ db.exec(`
   );
 `);
 
+// Миграция 25.08: у владельца теперь МНОГО узлов, но бот-продавец — ОДИН.
+// is_primary отмечает узел, на котором реально живёт процесс seller-bot. Остальные
+// узлы того же владельца — просто VPN-точки, подключаемые в этот единственный бот
+// (см. attach-location.ts). Раньше КАЖДЫЙ узел получал свою копию бота с тем же
+// токеном — второй процесс дрался с первым за getUpdates (409 Conflict), ловили
+// дважды на живом клиенте 25.08 (Германия, потом Амстердам) прежде чем нашли причину.
+// support_key_enc — свой ключ станка к узлу, добавляется вместе с ключом seller-bot
+// при подключении: доступ для техподдержки не завязан на пароль, который владелец
+// волен сменить в любой момент.
+for (const sql of [
+  `ALTER TABLE nodes ADD COLUMN is_primary INTEGER NOT NULL DEFAULT 0`,
+  `ALTER TABLE nodes ADD COLUMN support_key_enc TEXT`,
+]) {
+  try {
+    db.exec(sql);
+  } catch (e) {
+    if (!/duplicate column name/i.test(String(e))) throw e;
+  }
+}
+
 export interface NodeRow {
   id: number;
   tg_user_id: number;
@@ -26,6 +46,8 @@ export interface NodeRow {
   root_password_enc: string;
   seller_token_enc: string;
   status: string;
+  is_primary: number;
+  support_key_enc: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -36,11 +58,12 @@ export function insertNode(n: {
   serverIp: string;
   rootPasswordEnc: string;
   sellerTokenEnc: string;
+  isPrimary: boolean;
 }): number {
   const info = db
     .prepare(
-      `INSERT INTO nodes (tg_user_id, tg_username, server_ip, root_password_enc, seller_token_enc)
-       VALUES (@tgUserId, @tgUsername, @serverIp, @rootPasswordEnc, @sellerTokenEnc)`,
+      `INSERT INTO nodes (tg_user_id, tg_username, server_ip, root_password_enc, seller_token_enc, is_primary)
+       VALUES (@tgUserId, @tgUsername, @serverIp, @rootPasswordEnc, @sellerTokenEnc, @isPrimary)`,
     )
     .run({
       tgUserId: n.tgUserId,
@@ -48,6 +71,7 @@ export function insertNode(n: {
       serverIp: n.serverIp,
       rootPasswordEnc: n.rootPasswordEnc,
       sellerTokenEnc: n.sellerTokenEnc,
+      isPrimary: n.isPrimary ? 1 : 0,
     });
   return Number(info.lastInsertRowid);
 }
@@ -69,12 +93,14 @@ export function findNodeByIpOfOtherUser(serverIp: string, tgUserId: number): Nod
 }
 
 // Заводит заявку или обновляет существующую (тот же человек + тот же сервер). Возвращает id узла.
+// isPrimary решает вызывающий (onboarding) — здесь только сохраняем.
 export function upsertNode(n: {
   tgUserId: number;
   tgUsername?: string;
   serverIp: string;
   rootPasswordEnc: string;
   sellerTokenEnc: string;
+  isPrimary: boolean;
 }): number {
   const existing = findNodeByUserAndIp(n.tgUserId, n.serverIp);
   if (!existing) return insertNode(n);
@@ -82,7 +108,7 @@ export function upsertNode(n: {
   db.prepare(
     `UPDATE nodes
         SET tg_username = @tgUsername, root_password_enc = @rootPasswordEnc,
-            seller_token_enc = @sellerTokenEnc, status = 'pending_provision',
+            seller_token_enc = @sellerTokenEnc, is_primary = @isPrimary, status = 'pending_provision',
             updated_at = datetime('now')
       WHERE id = @id`,
   ).run({
@@ -90,6 +116,7 @@ export function upsertNode(n: {
     tgUsername: n.tgUsername ?? null,
     rootPasswordEnc: n.rootPasswordEnc,
     sellerTokenEnc: n.sellerTokenEnc,
+    isPrimary: n.isPrimary ? 1 : 0,
   });
   return existing.id;
 }
@@ -112,6 +139,19 @@ export function getReadyNodes(): NodeRow[] {
   return db.prepare("SELECT * FROM nodes WHERE status = 'ready' ORDER BY id").all() as NodeRow[];
 }
 
+// Живой узел с ботом-продавцом этого владельца — цель, куда attach-location.ts
+// подкладывает новые локации. undefined = у владельца ещё нет ни одного бота
+// (значит новый узел должен стать primary, а не VPN-точкой).
+export function getPrimaryReadyNode(tgUserId: number): NodeRow | undefined {
+  return db
+    .prepare("SELECT * FROM nodes WHERE tg_user_id = ? AND is_primary = 1 AND status = 'ready' ORDER BY id LIMIT 1")
+    .get(tgUserId) as NodeRow | undefined;
+}
+
 export function setNodeStatus(id: number, status: string): void {
   db.prepare("UPDATE nodes SET status = ?, updated_at = datetime('now') WHERE id = ?").run(status, id);
+}
+
+export function setNodeSupportKey(id: number, supportKeyEnc: string): void {
+  db.prepare("UPDATE nodes SET support_key_enc = ?, updated_at = datetime('now') WHERE id = ?").run(supportKeyEnc, id);
 }

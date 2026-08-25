@@ -38,7 +38,10 @@ async function pushOne(n: NodeRow): Promise<{ ok: boolean; why?: string }> {
   }
 }
 
-const nodes = getReadyNodes();
+// Только primary: деплой на VPN-точку (is_primary=0) поставил бы ВТОРУЮ копию бота
+// с тем же токеном на сервер, где бота вообще не должно быть — ровно баг 25.08 (409,
+// ловили дважды на живом клиенте). Обновление доп. локаций не нужно — там нет процесса.
+const nodes = getReadyNodes().filter((n) => n.is_primary === 1);
 
 if (cmd === 'list') {
   console.log(`Готовых узлов: ${nodes.length}\n`);
