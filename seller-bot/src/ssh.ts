@@ -2,12 +2,18 @@ import { execFile } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { NodeSSH } from 'node-ssh';
-import { SSH } from './constants.js';
+import { INSTALL_SCRIPT_TIMEOUT_MS, SSH } from './constants.js';
 import { keyPath, type RemoteLocation } from './locations.js';
 
 const execFileP = promisify(execFile);
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+// Тот же обкатанный установщик, что и у станка при заведении узла (ждёт
+// apt-lock, чинит Astra/Debian-производные, headless). Своя копия в seller-bot —
+// чтобы бот был самодостаточен на сервере франчайзи, без похода в станок.
+const INSTALL_SCRIPT = path.resolve(__dirname, '../scripts/install-amneziawg.sh');
 
 function quote(arg: string): string {
   return `'${arg.replace(/'/g, "'\\''")}'`;
@@ -100,32 +106,34 @@ function explainConnectError(e: unknown, host: string, port: number): string {
 
 export interface AttachResult {
   privateKey: string;
-  /** Что нашлось на сервере — чтобы сказать владельцу человеческим языком. */
-  amneziaInstalled: boolean;
+  /** VPN готов к концу вызова: был на сервере или мы его поставили. */
+  amneziaReady: boolean;
+  /** Ставили ли VPN в этот заход — чтобы сказать владельцу человеческим языком. */
+  installedNow: boolean;
 }
 
 /**
- * Первый заход на новый сервер: проверяем доступ и наличие VPN, ставим свой
- * ключ и возвращаем его. Пароль после этого нигде не сохраняется — см.
- * комментарий у saveKey() в locations.ts.
+ * Первый заход на новый сервер: проверяем доступ, ставим свой ключ и —
+ * если VPN на сервере ещё нет — ставим его сами тем же установщиком, что и
+ * станок. Так франчайзи может подключить хоть 100 голых VPS одним своим ботом,
+ * не заводя каждый через станок (решение Жони 25.08 — bring-your-own-server).
+ * Пароль после этого нигде не сохраняется — см. комментарий у saveKey().
+ *
+ * onProgress зовём на долгих шагах (установка VPN идёт минутами) — владельцу
+ * важно видеть, что бот работает, а не завис.
  */
 export async function attachServer(
   host: string,
   user: string,
   password: string,
   port: number = SSH.PORT,
+  onProgress?: (text: string) => void | Promise<void>,
 ): Promise<AttachResult> {
   const ssh = await connectWithPassword(host, user, password, port).catch((e: unknown) => {
     throw new Error(explainConnectError(e, host, port));
   });
   try {
-    // Есть ли вообще AmneziaWG. Ставить его отсюда пока не умеем (это делает
-    // станок при заведении узла) — поэтому честно сообщаем, а не молча
-    // добавляем сервер, с которого ключи не выдадутся.
-    const check = await ssh.execCommand(
-      'test -f /etc/amnezia/amneziawg/awg0.conf && command -v awg >/dev/null 2>&1 && echo OK || echo NO',
-    );
-    const amneziaInstalled = check.stdout.trim().endsWith('OK');
+    let amneziaReady = await hasAmnezia(ssh);
 
     const { priv, pub } = await generateKeypair();
     // Кладём свой ключ в authorized_keys, не затирая чужие.
@@ -137,10 +145,30 @@ export async function attachServer(
     if (res.code !== 0) {
       throw new Error('не удалось прописать ключ доступа: ' + (res.stderr || res.stdout).slice(0, 200));
     }
-    return { privateKey: priv, amneziaInstalled };
+
+    let installedNow = false;
+    if (!amneziaReady) {
+      await onProgress?.('🛠 VPN на сервере не найден — ставлю его сам. Это 2–5 минут (на свежем VPS иногда дольше), жди…');
+      // SERVER_PUB_IP = адрес, по которому мы этот сервер добавляем: Endpoint в
+      // конфигах будет верным сразу, а host локации его же ещё и подстрахует
+      // (withEndpointHost). Человеческие ошибки (apt занят, ОС не та) установщик
+      // пишет в stderr — они и всплывут через runScriptOn.
+      await runScriptOn(ssh, INSTALL_SCRIPT, [host], INSTALL_SCRIPT_TIMEOUT_MS);
+      installedNow = true;
+      amneziaReady = true;
+    }
+    return { privateKey: priv, amneziaReady, installedNow };
   } finally {
     ssh.dispose();
   }
+}
+
+/** Есть ли на сервере рабочий AmneziaWG (интерфейс поднят и утилита на месте). */
+async function hasAmnezia(ssh: NodeSSH): Promise<boolean> {
+  const check = await ssh.execCommand(
+    'test -f /etc/amnezia/amneziawg/awg0.conf && command -v awg >/dev/null 2>&1 && echo OK || echo NO',
+  );
+  return check.stdout.trim().endsWith('OK');
 }
 
 /**
@@ -155,6 +183,24 @@ export async function runScript(
   timeoutMs = 60_000,
 ): Promise<string> {
   const ssh = await connectWithKey(loc);
+  try {
+    return await runScriptOn(ssh, localScriptPath, args, timeoutMs);
+  } finally {
+    ssh.dispose();
+  }
+}
+
+/**
+ * Заливает и выполняет скрипт на УЖЕ ОТКРЫТОМ соединении (соединение не
+ * закрывает — им владеет вызывающий). Нужно, чтобы attachServer мог поставить
+ * VPN по тому же паролю, по которому только что зашёл, не переподключаясь.
+ */
+async function runScriptOn(
+  ssh: NodeSSH,
+  localScriptPath: string,
+  args: string[],
+  timeoutMs: number,
+): Promise<string> {
   const remotePath = `/tmp/seller-${path.basename(localScriptPath)}`;
   try {
     await ssh.putFile(localScriptPath, remotePath);
@@ -170,7 +216,6 @@ export async function runScript(
   } finally {
     // Скрипт за собой убираем: в /tmp чужого сервера мусор оставлять незачем
     await ssh.execCommand(`rm -f ${remotePath}`).catch(() => {});
-    ssh.dispose();
   }
 }
 

@@ -462,8 +462,7 @@ bot.callbackQuery('locadd', async (ctx) => {
     '➕ Новый сервер.\n\n' +
       'Пришли его IP-адрес.\n\n' +
       'Если SSH у тебя не на стандартном порту — через двоеточие: 203.0.113.10:2222\n\n' +
-      '⚠️ На сервере уже должен быть поднят VPN — заведи его через ' +
-      `${config.stanokUrl}, а потом добавь сюда.`,
+      '✅ Подойдёт даже чистый VPS: если VPN на нём ещё нет — я поставлю его сам.',
     { reply_markup: ask('loc-host'), link_preview_options: { is_disabled: true } },
   );
 });
@@ -694,35 +693,28 @@ bot.on('message:text', async (ctx) => {
     // ни у него, ни на серверах телеграма дольше необходимого.
     await ctx.deleteMessage().catch(() => {});
     const wait = await ctx.reply('⏳ Подключаюсь к серверу…');
+    const editWait = (t: string) =>
+      ctx.api
+        .editMessageText(ctx.chat.id, wait.message_id, t, { link_preview_options: { is_disabled: true } })
+        .then(() => {})
+        .catch(() => {});
     try {
-      const { privateKey, amneziaInstalled } = await attachServer(host, 'root', password, port ?? 22);
-      if (!amneziaInstalled) {
-        await ctx.api
-          .editMessageText(
-            ctx.chat.id,
-            wait.message_id,
-            '❌ Зайти получилось, но VPN на этом сервере не найден.\n\n' +
-              `Сначала подними на нём VPN через ${config.stanokUrl}, потом добавь сюда.`,
-            { link_preview_options: { is_disabled: true } },
-          )
-          .catch(() => {});
-        return;
-      }
+      // Если VPN на сервере нет — attachServer поставит его сам (сообщит через editWait).
+      const { privateKey, installedNow } = await attachServer(host, 'root', password, port ?? 22, editWait);
       const id = nextLocationId();
       const keyFile = `loc-${id}.key`;
       saveKey(keyFile, privateKey);
       addRemote({ id, title: host, host, ...(port ? { port } : {}), user: 'root', keyFile });
       await ctx.api.deleteMessage(ctx.chat.id, wait.message_id).catch(() => {});
+      const vpnLine = installedNow ? '\n🛡 VPN на нём я поставил сам — сервер сразу готов выдавать ключи.' : '';
       await ctx.reply(
-        `✅ Сервер ${host} подключён.\n\nКак назвать эту локацию? Название увидят клиенты — ` +
+        `✅ Сервер ${host} подключён.${vpnLine}\n\nКак назвать эту локацию? Название увидят клиенты — ` +
           'пришли страну или город, например «Лондон».',
         { reply_markup: ask('loc-title', id) },
       );
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      await ctx.api
-        .editMessageText(ctx.chat.id, wait.message_id, '❌ Не получилось подключиться.\n\nТех. детали:\n' + msg)
-        .catch(() => {});
+      await editWait('❌ Не получилось подключиться.\n\nТех. детали:\n' + msg);
     }
     return;
   }
