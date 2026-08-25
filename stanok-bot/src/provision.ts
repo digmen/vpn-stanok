@@ -5,6 +5,7 @@ import { config } from './config.js';
 import { decrypt, encrypt } from './crypto.js';
 import { getNodeById, getPrimaryReadyNode, setNodeStatus, setNodeSupportKey } from './db.js';
 import { runRemoteInstall } from './ssh.js';
+import { testHandshake } from './handshake-test.js';
 import { deploySeller, getBotUsername } from './deploy-seller.js';
 import { attachLocationToPrimary } from './attach-location.js';
 import { notifyAdmins } from './admin.js';
@@ -62,12 +63,36 @@ export async function provisionNode(
   await show(`🔌 Ставлю AmneziaWG на ${node.server_ip}… (пара минут)`);
 
   try {
-    await runRemoteInstall({
+    const firstClientConfig = await runRemoteInstall({
       host: node.server_ip,
       password,
       scriptLocalPath: SCRIPT_PATH,
       args: [node.server_ip],
     });
+
+    // 🔴 25.08: раньше отсюда сразу шли к setNodeStatus(nodeId, 'ready') на одном
+    // только "install-скрипт вышел с кодом 0" — а сервер мог не принимать VPN
+    // реально (порт UDP заблокирован у хостера и т.п.), и об этом узнавали
+    // только когда клиент жаловался. Теперь — настоящий handshake со станка
+    // ДО того, как сказать владельцу "готово". См. handshake-test.ts.
+    await show(`✅ VPN установлен на ${node.server_ip}. 🤝 Проверяю, что он реально принимает подключения…`);
+    const hs = await testHandshake(firstClientConfig);
+    if (!hs.ok) {
+      setNodeStatus(nodeId, 'error');
+      logEvent(who, 'provision_fail', `${node.server_ip} · handshake-test: ${hs.detail}`.slice(0, 200));
+      await show(
+        `⚠️ Сервер установился, но VPN на нём не отвечает реальным подключениям:\n${hs.detail}\n\n` +
+          'Частая причина — хостер по умолчанию блокирует нестандартные UDP-порты снаружи ' +
+          '(отдельно от файрвола на самом сервере) — стоит проверить в панели хостинга. ' +
+          'Можно нажать «Попробовать снова» после проверки.',
+        retryKb,
+      );
+      await notifyAdmins(
+        api,
+        `⚠️ Узел #${nodeId} (${node.server_ip}) поставился, но не прошёл проверку handshake: ${hs.detail}`,
+      );
+      return;
+    }
 
     if (node.is_primary) {
       await show('✅ VPN установлен. ⚙️ Запускаю твоего бота-продавца… ещё пара минут.');
