@@ -34,9 +34,15 @@ done
 CLIENT_V4="${V4PREFIX}.${NEXT}"
 CLIENT_V6="${V6PREFIX}${NEXT}"
 
-# Endpoint берём из существующего клиента (его определил установщик), иначе внешний IP
-ENDPOINT="$(grep -hoE 'Endpoint = [0-9.]+:[0-9]+' /root/awg0-client-*.conf 2>/dev/null | head -1 | awk '{print $3}' || true)"
-[ -n "$ENDPOINT" ] || ENDPOINT="$(curl -fsS4 https://api.ipify.org 2>/dev/null):${PORT}"
+# IP берём из существующего клиента (его определил установщик), иначе внешний IP —
+# но ПОРТ всегда из живого $PORT (прочитан выше из $SERVER_CONF), а не из старого файла.
+# 🔴 Фикс 26.08: раньше порт тоже брался из awg0-client-*.conf целиком (Endpoint = IP:PORT),
+# и если порт на сервере меняли вручную (например, переезд на 443 из-за DPI/провайдера) —
+# новые клиенты продолжали получать СТАРЫЙ порт в конфиге и не могли подключиться, хотя
+# сервер уже слушал новый. Поймано на живом узле (Александр, Амстердам, 59234 → 443).
+ENDPOINT_HOST="$(grep -hoE 'Endpoint = [0-9.]+:[0-9]+' /root/awg0-client-*.conf 2>/dev/null | head -1 | awk '{print $3}' | cut -d: -f1 || true)"
+[ -n "$ENDPOINT_HOST" ] || ENDPOINT_HOST="$(curl -fsS4 https://api.ipify.org 2>/dev/null)"
+ENDPOINT="${ENDPOINT_HOST}:${PORT}"
 
 umask 077
 CLIENT_PRIV="$(awg genkey)"
