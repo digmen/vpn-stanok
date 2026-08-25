@@ -30,6 +30,16 @@ function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+// 🔴 26.08: живой случай (Александр, Амстердам) — на Android VPN не подключался вообще
+// (ни по Wi-Fi, ни по мобильному), хотя на iPhone и ноуте всё работало. 4 часа искали
+// проблему в сервере — оказалось, дело в системной настройке телефона (Приватный DNS
+// Android 9+ конфликтует с VPN-туннелем). Кладём подсказку сразу всем при выдаче
+// конфига, а не только тем, кто написал в поддержку — иначе следующий покупатель
+// на Android пройдёт те же четыре часа молча.
+const ANDROID_HINT =
+  '\n\n📱 Если на Android не подключается (крутится и не коннектится) — ' +
+  'Настройки → Сеть и интернет → Приватный DNS → выключить.';
+
 // Предлагаем выбрать формат — человек берёт только то, что нужно (не всё сразу).
 export async function offerConfig(api: Api, chatId: number, config: string, title?: string): Promise<void> {
   const id = stash(config, title ?? '');
@@ -38,7 +48,7 @@ export async function offerConfig(api: Api, chatId: number, config: string, titl
     .text('📄 Файл', `fmt:file:${id}`)
     .text('📋 Текст', `fmt:text:${id}`);
   const head = title ? `✅ ${title} — ключ готов. Как получить?` : '✅ Твой VPN готов. Как получить конфиг?';
-  await api.sendMessage(chatId, head, { reply_markup: kb });
+  await api.sendMessage(chatId, head + ANDROID_HINT, { reply_markup: kb });
 }
 
 /**
