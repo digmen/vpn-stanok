@@ -28,3 +28,19 @@ export function extractClientConfig(stdout: string): string | null {
 export function withEndpointHost(config: string, host: string): string {
   return config.replace(/^(Endpoint\s*=\s*)[^\s:]+(:\d+)\s*$/im, `$1${host}$2`);
 }
+
+/**
+ * То же самое, что withEndpointHost, но для VLESS-ссылок (`vless://uuid@host:port?...`)
+ * вместо WireGuard-конфига. Тот же общий фикс бага 25.08 применяется и к
+ * VLESS+Reality-локациям: add-vless-reality-peer.sh не может надёжно знать свой
+ * публичный IP (сервер мог сменить адрес без переустановки), источник правды —
+ * host локации в боте.
+ *
+ * Матчит только сегмент между `@` и `:порт` — специально НЕ трогает `sni=`/`host=`
+ * query-параметры дальше в строке. Для Reality `sni` это ЦЕЛЬ МАСКИРОВКИ
+ * (addons.mozilla.org), а не адрес сервера — перезаписать его так же, как host,
+ * значило бы сломать саму маскировку.
+ */
+export function withVlessHost(link: string, host: string): string {
+  return link.replace(/^(vless:\/\/[^@]+@)[^:/?#]+(:)/i, `$1${host}$2`);
+}

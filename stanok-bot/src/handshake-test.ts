@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -102,6 +102,129 @@ export async function testHandshake(clientConfig: string, waitMs = 8000): Promis
     const msg = e instanceof Error ? e.message : String(e);
     return { ok: false, detail: 'не удалось поднять тестовый туннель на станке: ' + msg.slice(0, 200) };
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// --- VLESS+Reality: тот же принцип проверки ("реально работает", не "скрипт не упал"),
+// другой механизм — Reality не умеет голого криптографического handshake без полного
+// TLS-рукопожатия, поэтому вместо awg-интерфейса поднимаем временный Xray-клиент
+// (SOCKS-инбаунд на loopback) и тянем через него реальный HTTP-запрос. Это буквально
+// автоматизация того, что руками делали на пражском стенде 31.08 (curl через SOCKS,
+// api.ipify.org вернул адрес сервера — значит трафик реально прошёл через Reality).
+//
+// Требует бинарник `xray` на самом станке. Он там есть (поставлен вручную во время
+// теста 31.08) — если станок когда-нибудь переедет на чистую машину, этот бинарник
+// придётся поставить заново тем же официальным установщиком, что и на узлах.
+
+const VLESS_LINK_RE =
+  /^vless:\/\/([^@]+)@([^:/?#]+):(\d+)\?([^#]*)/i;
+
+interface ParsedVlessLink {
+  uuid: string;
+  host: string;
+  port: number;
+  pbk: string;
+  sni: string;
+  sid: string;
+  flow: string;
+}
+
+export function parseVlessRealityLink(link: string): ParsedVlessLink {
+  const m = link.match(VLESS_LINK_RE);
+  if (!m) throw new Error('не похоже на vless-ссылку: ' + link.slice(0, 100));
+  const params = new URLSearchParams(m[4]);
+  const pbk = params.get('pbk');
+  const sni = params.get('sni');
+  const sid = params.get('sid');
+  if (!pbk || !sni || !sid) throw new Error('в vless-ссылке нет pbk/sni/sid — не Reality-профиль');
+  return {
+    uuid: m[1],
+    host: m[2],
+    port: Number(m[3]),
+    pbk,
+    sni,
+    sid,
+    flow: params.get('flow') ?? '',
+  };
+}
+
+async function xrayAvailable(): Promise<boolean> {
+  try {
+    await execFileP('xray', ['version']);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Поднимает временный Xray-клиент на СТАНКЕ, направленный на только что
+ * установленный VLESS+Reality-сервер, и тянет через него реальный HTTP-запрос.
+ * Успех = запрос прошёл и вернул осмысленный ответ — не просто "процесс не упал".
+ */
+export async function testVlessRealityHandshake(link: string, waitMs = 5000): Promise<HandshakeTestResult> {
+  if (!(await xrayAvailable())) {
+    return { ok: false, detail: 'на станке нет бинарника xray — проверка невозможна, ставь его вручную (см. комментарий в коде)' };
+  }
+
+  let peer: ParsedVlessLink;
+  try {
+    peer = parseVlessRealityLink(link);
+  } catch (e) {
+    return { ok: false, detail: e instanceof Error ? e.message : String(e) };
+  }
+
+  const socksPort = 20000 + Math.floor(Math.random() * 10000);
+  const dir = mkdtempSync(path.join(tmpdir(), 'stanok-vless-hstest-'));
+  const confPath = path.join(dir, 'client.json');
+  const clientConfig = {
+    log: { loglevel: 'warning' },
+    inbounds: [{ listen: '127.0.0.1', port: socksPort, protocol: 'socks', settings: { udp: false } }],
+    outbounds: [
+      {
+        protocol: 'vless',
+        settings: {
+          vnext: [
+            {
+              address: peer.host,
+              port: peer.port,
+              users: [{ id: peer.uuid, encryption: 'none', flow: peer.flow || undefined }],
+            },
+          ],
+        },
+        streamSettings: {
+          network: 'tcp',
+          security: 'reality',
+          realitySettings: { serverName: peer.sni, publicKey: peer.pbk, shortId: peer.sid, fingerprint: 'chrome' },
+        },
+      },
+    ],
+  };
+  writeFileSync(confPath, JSON.stringify(clientConfig), { mode: 0o600 });
+
+  const proc = spawn('xray', ['run', '-c', confPath], { stdio: 'ignore' });
+  try {
+    await new Promise((r) => setTimeout(r, waitMs));
+    const { stdout } = await execFileP(
+      'curl',
+      ['-fsS', '--max-time', '8', '-x', `socks5h://127.0.0.1:${socksPort}`, 'https://api.ipify.org'],
+    );
+    const ip = stdout.trim();
+    if (/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) {
+      return { ok: true, detail: `запрос через Reality прошёл, ответ от api.ipify.org: ${ip}` };
+    }
+    return { ok: false, detail: 'curl вернул что-то не похожее на IP: ' + ip.slice(0, 100) };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return {
+      ok: false,
+      detail:
+        'запрос через Reality не прошёл — сервер поднялся, но трафик не идёт (порт 443 закрыт файрволом хостера?): ' +
+        msg.slice(0, 200),
+    };
+  } finally {
+    proc.kill();
     rmSync(dir, { recursive: true, force: true });
   }
 }

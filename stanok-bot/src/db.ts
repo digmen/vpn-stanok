@@ -27,9 +27,15 @@ db.exec(`
 // support_key_enc — свой ключ станка к узлу, добавляется вместе с ключом seller-bot
 // при подключении: доступ для техподдержки не завязан на пароль, который владелец
 // волен сменить в любой момент.
+// Миграция 05.09: до этого станок умел ставить только AmneziaWG, протокол
+// нигде не хранился (подразумевался единственным). Добавили VLESS+Reality
+// (без домена — см. scripts/install-vless-reality.sh) как второй вариант,
+// выбираемый в onboarding.ts. DEFAULT 'amneziawg' — все узлы ДО этой миграции
+// реально им и являются, менять задним числом нечего.
 for (const sql of [
   `ALTER TABLE nodes ADD COLUMN is_primary INTEGER NOT NULL DEFAULT 0`,
   `ALTER TABLE nodes ADD COLUMN support_key_enc TEXT`,
+  `ALTER TABLE nodes ADD COLUMN protocol TEXT NOT NULL DEFAULT 'amneziawg'`,
 ]) {
   try {
     db.exec(sql);
@@ -37,6 +43,8 @@ for (const sql of [
     if (!/duplicate column name/i.test(String(e))) throw e;
   }
 }
+
+export type NodeProtocol = 'amneziawg' | 'vless_reality';
 
 export interface NodeRow {
   id: number;
@@ -48,6 +56,7 @@ export interface NodeRow {
   status: string;
   is_primary: number;
   support_key_enc: string | null;
+  protocol: NodeProtocol;
   created_at: string;
   updated_at: string;
 }
@@ -59,11 +68,12 @@ export function insertNode(n: {
   rootPasswordEnc: string;
   sellerTokenEnc: string;
   isPrimary: boolean;
+  protocol: NodeProtocol;
 }): number {
   const info = db
     .prepare(
-      `INSERT INTO nodes (tg_user_id, tg_username, server_ip, root_password_enc, seller_token_enc, is_primary)
-       VALUES (@tgUserId, @tgUsername, @serverIp, @rootPasswordEnc, @sellerTokenEnc, @isPrimary)`,
+      `INSERT INTO nodes (tg_user_id, tg_username, server_ip, root_password_enc, seller_token_enc, is_primary, protocol)
+       VALUES (@tgUserId, @tgUsername, @serverIp, @rootPasswordEnc, @sellerTokenEnc, @isPrimary, @protocol)`,
     )
     .run({
       tgUserId: n.tgUserId,
@@ -72,6 +82,7 @@ export function insertNode(n: {
       rootPasswordEnc: n.rootPasswordEnc,
       sellerTokenEnc: n.sellerTokenEnc,
       isPrimary: n.isPrimary ? 1 : 0,
+      protocol: n.protocol,
     });
   return Number(info.lastInsertRowid);
 }
@@ -101,6 +112,7 @@ export function upsertNode(n: {
   rootPasswordEnc: string;
   sellerTokenEnc: string;
   isPrimary: boolean;
+  protocol: NodeProtocol;
 }): number {
   const existing = findNodeByUserAndIp(n.tgUserId, n.serverIp);
   if (!existing) return insertNode(n);
@@ -108,8 +120,8 @@ export function upsertNode(n: {
   db.prepare(
     `UPDATE nodes
         SET tg_username = @tgUsername, root_password_enc = @rootPasswordEnc,
-            seller_token_enc = @sellerTokenEnc, is_primary = @isPrimary, status = 'pending_provision',
-            updated_at = datetime('now')
+            seller_token_enc = @sellerTokenEnc, is_primary = @isPrimary, protocol = @protocol,
+            status = 'pending_provision', updated_at = datetime('now')
       WHERE id = @id`,
   ).run({
     id: existing.id,
@@ -117,6 +129,7 @@ export function upsertNode(n: {
     rootPasswordEnc: n.rootPasswordEnc,
     sellerTokenEnc: n.sellerTokenEnc,
     isPrimary: n.isPrimary ? 1 : 0,
+    protocol: n.protocol,
   });
   return existing.id;
 }

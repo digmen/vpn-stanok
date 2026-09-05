@@ -3,9 +3,9 @@ import { fileURLToPath } from 'node:url';
 import { InlineKeyboard, type Api } from 'grammy';
 import { config } from './config.js';
 import { decrypt, encrypt } from './crypto.js';
-import { getNodeById, getPrimaryReadyNode, setNodeStatus, setNodeSupportKey } from './db.js';
+import { getNodeById, getPrimaryReadyNode, setNodeStatus, setNodeSupportKey, type NodeProtocol } from './db.js';
 import { runRemoteInstall } from './ssh.js';
-import { testHandshake } from './handshake-test.js';
+import { testHandshake, testVlessRealityHandshake } from './handshake-test.js';
 import { deploySeller, getBotUsername } from './deploy-seller.js';
 import { attachLocationToPrimary } from './attach-location.js';
 import { notifyAdmins } from './admin.js';
@@ -13,9 +13,21 @@ import { checkSshPort, preflightMessage } from './preflight.js';
 import { logEvent } from './events.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const SCRIPT_PATH = path.resolve(__dirname, '../scripts/install-amneziawg.sh');
 
-// Провижининг узла: ставим AmneziaWG и разворачиваем бота-продавца.
+// Один скрипт установки и одна проверка "реально работает" на протокол — какую пару
+// взять решает node.protocol (заведено 05.09 вместе с VLESS+Reality, до этого
+// протокол был только один и путь был захардкожен прямо тут).
+const INSTALL: Record<NodeProtocol, { script: string; label: string }> = {
+  amneziawg: { script: path.resolve(__dirname, '../scripts/install-amneziawg.sh'), label: 'AmneziaWG' },
+  vless_reality: { script: path.resolve(__dirname, '../scripts/install-vless-reality.sh'), label: 'VLESS+Reality' },
+};
+
+async function runHandshakeTest(protocol: NodeProtocol, clientConfig: string) {
+  return protocol === 'vless_reality' ? testVlessRealityHandshake(clientConfig) : testHandshake(clientConfig);
+}
+
+// Провижининг узла: ставим VPN (AmneziaWG или VLESS+Reality — см. node.protocol)
+// и разворачиваем бота-продавца.
 // Всё показываем в ОДНОМ сообщении (редактируем его), чтобы чат не засорялся.
 // Свой VPN владелец берёт уже в СВОЁМ боте («Мой VPN»), не тут.
 export async function provisionNode(
@@ -59,14 +71,16 @@ export async function provisionNode(
     return;
   }
 
+  const install = INSTALL[node.protocol];
+
   setNodeStatus(nodeId, 'provisioning');
-  await show(`🔌 Ставлю AmneziaWG на ${node.server_ip}… (пара минут)`);
+  await show(`🔌 Ставлю ${install.label} на ${node.server_ip}… (пара минут)`);
 
   try {
     const firstClientConfig = await runRemoteInstall({
       host: node.server_ip,
       password,
-      scriptLocalPath: SCRIPT_PATH,
+      scriptLocalPath: install.script,
       args: [node.server_ip],
     });
 
@@ -76,15 +90,19 @@ export async function provisionNode(
     // только когда клиент жаловался. Теперь — настоящий handshake со станка
     // ДО того, как сказать владельцу "готово". См. handshake-test.ts.
     await show(`✅ VPN установлен на ${node.server_ip}. 🤝 Проверяю, что он реально принимает подключения…`);
-    const hs = await testHandshake(firstClientConfig);
+    const hs = await runHandshakeTest(node.protocol, firstClientConfig);
     if (!hs.ok) {
       setNodeStatus(nodeId, 'error');
       logEvent(who, 'provision_fail', `${node.server_ip} · handshake-test: ${hs.detail}`.slice(0, 200));
+      const commonCause =
+        node.protocol === 'vless_reality'
+          ? 'Частая причина — хостер блокирует исходящий/входящий TCP:443 снаружи (отдельно от ' +
+            'файрвола на самом сервере) — стоит проверить в панели хостинга.'
+          : 'Частая причина — хостер по умолчанию блокирует нестандартные UDP-порты снаружи ' +
+            '(отдельно от файрвола на самом сервере) — стоит проверить в панели хостинга.';
       await show(
         `⚠️ Сервер установился, но VPN на нём не отвечает реальным подключениям:\n${hs.detail}\n\n` +
-          'Частая причина — хостер по умолчанию блокирует нестандартные UDP-порты снаружи ' +
-          '(отдельно от файрвола на самом сервере) — стоит проверить в панели хостинга. ' +
-          'Можно нажать «Попробовать снова» после проверки.',
+          `${commonCause} Можно нажать «Попробовать снова» после проверки.`,
         retryKb,
       );
       await notifyAdmins(
@@ -104,16 +122,21 @@ export async function provisionNode(
         ownerId: node.tg_user_id,
         stanokUrl: config.stanokUrl,
         priceStars: config.sellerPriceStars,
+        protocol: node.protocol,
       });
 
       setNodeStatus(nodeId, 'ready');
       logEvent(who, 'provision_ok', node.server_ip);
       const uname = await getBotUsername(sellerToken);
       const kb = uname ? new InlineKeyboard().url('🚀 Открыть моего бота', `https://t.me/${uname}`) : undefined;
+      const appLine =
+        node.protocol === 'vless_reality'
+          ? 'Клиентам он продаёт VPN за ⭐️. Для подключения — приложение v2rayNG (Android) / OneXray (iPhone).'
+          : 'Клиентам он продаёт VPN за ⭐️. Для подключения — приложение AmneziaVPN.';
       await show(
         '🎉 Готово! Твой VPN-бизнес запущен.\n\n' +
           'Открой своего бота → /start → «🆓 Мой VPN» — заберёшь свой VPN там.\n' +
-          'Клиентам он продаёт VPN за ⭐️. Для подключения — приложение AmneziaVPN.',
+          appLine,
         kb,
       );
     } else {
@@ -136,6 +159,7 @@ export async function provisionNode(
         newPassword: password,
         primaryHost: primary.server_ip,
         primaryPassword: decrypt(primary.root_password_enc),
+        protocol: node.protocol,
       });
       setNodeSupportKey(nodeId, encrypt(supportPrivateKey));
 

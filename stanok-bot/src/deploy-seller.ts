@@ -13,6 +13,10 @@ export interface DeployOpts {
   ownerId: number;
   stanokUrl: string;
   priceStars: number;
+  /** Какой протокол установлен на ЭТОМ (primary) сервере — seller-bot читает его
+   *  из .env, чтобы знать, каким add/revoke-скриптом обслуживать локацию 'local'
+   *  (см. seller-bot/src/config.ts::primaryProtocol, locations.ts::allLocations). */
+  protocol: 'amneziawg' | 'vless_reality';
 }
 
 // Разворачивает бота-продавца на сервере узла: Node + pm2 + код + npm install + .env + запуск.
@@ -73,6 +77,7 @@ export async function deploySeller(opts: DeployOpts): Promise<void> {
       `STANOK_URL=${opts.stanokUrl}`,
       `PRICE_STARS=${opts.priceStars}`,
       `DATA_DIR=${REMOTE.SELLER_DATA_DIR}`,
+      `PRIMARY_PROTOCOL=${opts.protocol}`,
     ].join('\n');
     const writeEnv = await ssh.execCommand(`cat > ${remoteDir}/.env <<'ENVEOF'\n${env}\nENVEOF`);
     if (writeEnv.code !== 0) throw new Error('не удалось записать .env');

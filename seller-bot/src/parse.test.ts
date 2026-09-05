@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { withEndpointHost } from './parse.js';
+import { withEndpointHost, withVlessHost } from './parse.js';
 
 // Общий фикс бага 25.08: Endpoint в клиентском конфиге должен браться из адреса
 // локации в боте (владелец им управляет), а не из зашитого на сервере IP.
@@ -57,4 +57,36 @@ test('лишние пробелы вокруг = допустимы', () => {
     withEndpointHost('Endpoint=81.29.146.30:52066', '9.9.9.9'),
     'Endpoint=9.9.9.9:52066',
   );
+});
+
+// withVlessHost — тот же фикс бага 25.08, для VLESS+Reality-ссылок вместо
+// WireGuard-конфига (см. комментарий в parse.ts).
+
+test('vless: меняет host в @host:port, оставляя остальное как есть', () => {
+  const link =
+    'vless://ab3ff2ad-905b-4828-92c8-c7d79a12497c@0.0.0.0:443?type=tcp&security=reality&' +
+    'pbk=UvHrEm4h-aToTbso3JZUa8sGdIqIk0FLpE4eY_8XJQQ&fp=chrome&sni=addons.mozilla.org&' +
+    'sid=3b561373a6ee57fb&flow=xtls-rprx-vision#0.0.0.0';
+  const out = withVlessHost(link, '194.87.126.220');
+  // Меняется именно @host:port, а не что попало по подстроке — старый адрес
+  // ниже в строке (в подписи label после #) намеренно НЕ трогаем, это только
+  // косметическое имя профиля в приложении клиента, не адрес подключения.
+  assert.match(out, /^vless:\/\/ab3ff2ad-905b-4828-92c8-c7d79a12497c@194\.87\.126\.220:443\?/);
+  // sni — цель маскировки, не адрес сервера, не должен трогаться
+  assert.ok(out.includes('sni=addons.mozilla.org'));
+});
+
+test('vless: сохраняет UUID и порт нетронутыми', () => {
+  const link = 'vless://uuid-123@1.2.3.4:8443?type=tcp&security=reality#label';
+  assert.equal(
+    withVlessHost(link, '9.9.9.9'),
+    'vless://uuid-123@9.9.9.9:8443?type=tcp&security=reality#label',
+  );
+});
+
+test('vless: не путает host в @ с host= query-параметром дальше в строке', () => {
+  const link = 'vless://uuid@1.2.3.4:443?host=example.com&sni=example.com#label';
+  const out = withVlessHost(link, '5.6.7.8');
+  assert.ok(out.startsWith('vless://uuid@5.6.7.8:443?'));
+  assert.ok(out.includes('host=example.com')); // query-параметр не тронут
 });

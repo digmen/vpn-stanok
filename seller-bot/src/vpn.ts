@@ -3,14 +3,28 @@ import { promisify } from 'node:util';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PEER_SCRIPT_TIMEOUT_MS } from './constants.js';
-import { extractClientConfig, withEndpointHost } from './parse.js';
-import { allLocations, findLocation, PRIMARY_LOCATION_ID, type Location } from './locations.js';
+import { extractClientConfig, withEndpointHost, withVlessHost } from './parse.js';
+import { allLocations, findLocation, PRIMARY_LOCATION_ID, type Location, type VpnProtocol } from './locations.js';
 import { runScript } from './ssh.js';
 
 const execFileP = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const ADD_SCRIPT = path.resolve(__dirname, '../scripts/add-amneziawg-peer.sh');
-const REVOKE_SCRIPT = path.resolve(__dirname, '../scripts/revoke-amneziawg-peer.sh');
+
+// Скрипты выдачи/отзыва — пара на протокол. Какую пару взять для конкретной
+// локации решает scriptsFor(loc.protocol), а не что-то жёстко зашитое здесь —
+// раньше (до 05.09) был всего один протокол, и путь был захардкожен прямо в
+// createVpnPeerAt/revokePeerAt; теперь локации бывают разного протокола, и
+// каждая помнит свой (см. locations.ts::Location.protocol).
+const SCRIPTS: Record<VpnProtocol, { add: string; revoke: string }> = {
+  amneziawg: {
+    add: path.resolve(__dirname, '../scripts/add-amneziawg-peer.sh'),
+    revoke: path.resolve(__dirname, '../scripts/revoke-amneziawg-peer.sh'),
+  },
+  vless_reality: {
+    add: path.resolve(__dirname, '../scripts/add-vless-reality-peer.sh'),
+    revoke: path.resolve(__dirname, '../scripts/revoke-vless-reality-peer.sh'),
+  },
+};
 
 export interface Peer {
   config: string;
@@ -38,18 +52,19 @@ function shortError(e: unknown): string {
 
 /** Добавляет клиента на ОДНОЙ конкретной локации. */
 export async function createVpnPeerAt(loc: Location): Promise<Peer> {
+  const scripts = SCRIPTS[loc.protocol];
   try {
     const stdout =
       loc.kind === 'local'
-        ? (await execFileP('bash', [ADD_SCRIPT], { timeout: PEER_SCRIPT_TIMEOUT_MS })).stdout
-        : await runScript(loc.remote!, ADD_SCRIPT, [], PEER_SCRIPT_TIMEOUT_MS);
+        ? (await execFileP('bash', [scripts.add], { timeout: PEER_SCRIPT_TIMEOUT_MS })).stdout
+        : await runScript(loc.remote!, scripts.add, [], PEER_SCRIPT_TIMEOUT_MS);
     const { config, pubkey } = parsePeerOutput(stdout);
-    // Endpoint берём из АДРЕСА ЛОКАЦИИ в боте, а не из зашитого на сервере
-    // SERVER_PUB_IP (общий фикс бага 25.08, см. withEndpointHost). У основного
-    // сервера отдельного адреса в боте нет — там оставляем как пришло (его IP
-    // стабилен, на нём и живёт сам бот).
+    // Endpoint/host берём из АДРЕСА ЛОКАЦИИ в боте, а не из того, что скрипт сам
+    // определил на сервере (общий фикс бага 25.08, см. withEndpointHost/
+    // withVlessHost) — какую именно функцию звать, решает протокол локации.
+    // У основного сервера отдельного адреса в боте нет — оставляем как пришло.
     const host = loc.kind === 'ssh' ? loc.remote?.host : undefined;
-    const finalConfig = host ? withEndpointHost(config, host) : config;
+    const finalConfig = host ? (loc.protocol === 'vless_reality' ? withVlessHost(config, host) : withEndpointHost(config, host)) : config;
     return { config: finalConfig, pubkey, loc: loc.id, locTitle: loc.title };
   } catch (e: unknown) {
     throw new Error(shortError(e));
@@ -90,7 +105,7 @@ export async function createVpnPeersEverywhere(): Promise<MultiResult> {
   return { peers, failed };
 }
 
-/** Отзывает клиента по публичному ключу на той локации, где он был выдан. */
+/** Отзывает клиента по публичному ключу (для VLESS — по UUID) на той локации, где он был выдан. */
 export async function revokePeerAt(locId: string, pubkey: string): Promise<void> {
   const loc = findLocation(locId);
   if (!loc) {
@@ -98,9 +113,10 @@ export async function revokePeerAt(locId: string, pubkey: string): Promise<void>
     // владелец гасит такой сервер целиком (см. removeRemote в locations.ts).
     return;
   }
+  const revokeScript = SCRIPTS[loc.protocol].revoke;
   if (loc.kind === 'local') {
-    await execFileP('bash', [REVOKE_SCRIPT, pubkey], { timeout: 30_000 });
+    await execFileP('bash', [revokeScript, pubkey], { timeout: 30_000 });
     return;
   }
-  await runScript(loc.remote!, REVOKE_SCRIPT, [pubkey], 30_000);
+  await runScript(loc.remote!, revokeScript, [pubkey], 30_000);
 }

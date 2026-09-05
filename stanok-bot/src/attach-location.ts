@@ -35,6 +35,10 @@ export interface AttachLocationOpts {
   primaryPassword: string;
   /** Как назвать локацию у клиентов — по умолчанию сам адрес. */
   title?: string;
+  /** Какой протокол уже установлен на newHost (см. provision.ts — установка идёт
+   *  ДО вызова этой функции). Влияет только на то, что запишется в locations.json
+   *  primary-бота — сама установка сюда не входит. */
+  protocol: 'amneziawg' | 'vless_reality';
 }
 
 export interface AttachLocationResult {
@@ -99,7 +103,7 @@ export async function attachLocationToPrimary(opts: AttachLocationOpts): Promise
   try {
     const remoteKeyPath = `/tmp/stanok-loc-${Date.now()}.key`;
     await primarySsh.execCommand(`cat > ${remoteKeyPath} <<'KEYEOF'\n${locationKey.priv}KEYEOF\nchmod 600 ${remoteKeyPath}`);
-    const args = [opts.newHost, String(opts.newPort ?? ''), remoteKeyPath, opts.title ?? opts.newHost]
+    const args = [opts.newHost, String(opts.newPort ?? ''), remoteKeyPath, opts.title ?? opts.newHost, opts.protocol]
       .map(quote)
       .join(' ');
     const res = await primarySsh.execCommand(`cd ${REMOTE.SELLER_DIR} && npx tsx scripts/cli-add-location.ts ${args}`);

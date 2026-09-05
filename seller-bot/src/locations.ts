@@ -2,6 +2,8 @@ import { chmodSync, existsSync, readFileSync, unlinkSync, writeFileSync } from '
 import path from 'node:path';
 import { config } from './config.js';
 
+export type VpnProtocol = 'amneziawg' | 'vless_reality';
+
 // Локации = VPN-серверы, с которых бот выдаёт ключи.
 //
 // Зачем: до 24.08 бот умел ровно один сервер — тот, на котором сам работает,
@@ -28,6 +30,9 @@ export interface RemoteLocation {
   /** Имя файла с приватным ключом внутри dataDir (сам ключ рядом, права 600). */
   keyFile: string;
   addedAt: number;
+  /** Какой протокол там установлен. Отсутствует у старых записей — считаем amneziawg
+   *  (все локации до 05.09 были только AmneziaWG, миграция задним числом не нужна). */
+  protocol?: VpnProtocol;
 }
 
 export interface Location {
@@ -36,6 +41,7 @@ export interface Location {
   /** local — сервер самого бота, ssh — удалённый. */
   kind: 'local' | 'ssh';
   remote?: RemoteLocation;
+  protocol: VpnProtocol;
 }
 
 export const LOCATION_LIMITS = {
@@ -63,6 +69,7 @@ function readRemotes(): RemoteLocation[] {
         user: String(r.user ?? 'root'),
         keyFile: r.keyFile,
         addedAt: Number(r.addedAt) || Date.now(),
+        ...(r.protocol === 'vless_reality' ? { protocol: 'vless_reality' as const } : {}),
       }));
   } catch {
     return [];
@@ -99,8 +106,10 @@ export function setPrimaryTitle(title: string): void {
 /** Все локации: основная всегда первая, дальше добавленные в порядке добавления. */
 export function allLocations(): Location[] {
   return [
-    { id: PRIMARY_LOCATION_ID, title: primaryTitle(), kind: 'local' },
-    ...readRemotes().map((r): Location => ({ id: r.id, title: r.title, kind: 'ssh', remote: r })),
+    { id: PRIMARY_LOCATION_ID, title: primaryTitle(), kind: 'local', protocol: config.primaryProtocol },
+    ...readRemotes().map(
+      (r): Location => ({ id: r.id, title: r.title, kind: 'ssh', remote: r, protocol: r.protocol ?? 'amneziawg' }),
+    ),
   ];
 }
 
@@ -148,6 +157,9 @@ export function readKey(keyFile: string): string {
 }
 
 export function addRemote(loc: Omit<RemoteLocation, 'addedAt'>): RemoteLocation {
+  // protocol отсутствует у вызывающего кода до 05.09 (cli-add-location.ts старой
+  // версии) — undefined тут и означает amneziawg, ничего особого делать не нужно,
+  // readRemotes()/allLocations() уже трактуют отсутствие поля так же.
   const list = readRemotes();
   const row: RemoteLocation = { ...loc, addedAt: Date.now() };
   list.push(row);

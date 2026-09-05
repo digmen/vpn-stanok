@@ -1,5 +1,5 @@
 import { describe, expect, test } from '@jest/globals';
-import { parseClientConfig } from './handshake-test.js';
+import { parseClientConfig, parseVlessRealityLink } from './handshake-test.js';
 
 const SAMPLE = `[Interface]
 PrivateKey = cMyvucdZZOm3zKZwh3ICPQf8qAxcddCznEe5QRDv7kc=
@@ -56,6 +56,43 @@ describe('parseClientConfig', () => {
   test('нет PrivateKey/Endpoint/PublicKey — кидает понятную ошибку', () => {
     expect(() => parseClientConfig('[Interface]\nAddress = 10.0.0.1/32')).toThrow(
       /PrivateKey.*Endpoint.*PublicKey/,
+    );
+  });
+});
+
+describe('parseVlessRealityLink', () => {
+  // Реальная ссылка с пражского стенда (31.08, см. Проекты/VLESS-Александр) —
+  // не выдуманный пример, тот самый формат, что install-vless-reality.sh отдаёт.
+  const LINK =
+    'vless://99e2a846-47e5-4162-8ea0-2b488ee5c4d7@194.87.126.220:443?type=tcp&security=reality&' +
+    'pbk=UvHrEm4h-aToTbso3JZUa8sGdIqIk0FLpE4eY_8XJQQ&fp=chrome&sni=addons.mozilla.org&' +
+    'sid=3b561373a6ee57fb&flow=xtls-rprx-vision#zhoni-msk-test-prague';
+
+  test('вытаскивает uuid, host, port, pbk/sni/sid/flow', () => {
+    const p = parseVlessRealityLink(LINK);
+    expect(p.uuid).toBe('99e2a846-47e5-4162-8ea0-2b488ee5c4d7');
+    expect(p.host).toBe('194.87.126.220');
+    expect(p.port).toBe(443);
+    expect(p.pbk).toBe('UvHrEm4h-aToTbso3JZUa8sGdIqIk0FLpE4eY_8XJQQ');
+    expect(p.sni).toBe('addons.mozilla.org');
+    expect(p.sid).toBe('3b561373a6ee57fb');
+    expect(p.flow).toBe('xtls-rprx-vision');
+  });
+
+  test('без flow — поле просто пустое, не падает', () => {
+    const p = parseVlessRealityLink(
+      'vless://uuid@1.2.3.4:443?type=tcp&security=reality&pbk=X&sni=Y&sid=Z#label',
+    );
+    expect(p.flow).toBe('');
+  });
+
+  test('не vless-ссылка — понятная ошибка', () => {
+    expect(() => parseVlessRealityLink('not-a-link')).toThrow(/не похоже на vless-ссылку/);
+  });
+
+  test('vless-ссылка без pbk/sni/sid (не Reality) — понятная ошибка', () => {
+    expect(() => parseVlessRealityLink('vless://uuid@1.2.3.4:443?type=ws&security=tls#label')).toThrow(
+      /pbk\/sni\/sid/,
     );
   });
 });

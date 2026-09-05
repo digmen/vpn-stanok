@@ -28,4 +28,10 @@ export const config = {
   stanokUrl: process.env.STANOK_URL ?? 'https://t.me/VPNForge_bot',
   // папка изменяемого состояния (переживает обновления кода). Локально — текущая.
   dataDir: process.env.DATA_DIR ?? '.',
+  // Какой протокол установлен НА ЭТОМ сервере (primary/local-локация) — station
+  // (provision.ts/deploy-seller.ts) пишет это в .env при разворачивании, до 05.09
+  // переменной не было вообще, отсутствие = amneziawg (все узлы были только им).
+  primaryProtocol: (process.env.PRIMARY_PROTOCOL === 'vless_reality' ? 'vless_reality' : 'amneziawg') as
+    | 'amneziawg'
+    | 'vless_reality',
 };
