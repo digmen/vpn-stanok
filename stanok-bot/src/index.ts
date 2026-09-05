@@ -1,14 +1,21 @@
 import { Bot, InlineKeyboard, session } from 'grammy';
 import { conversations, createConversation } from '@grammyjs/conversations';
 import { config } from './config.js';
-import { getAllNodes, getNodesByUser, getReadyNodes } from './db.js';
+import {
+  getAllNodes,
+  getNodeById,
+  getNodesByUser,
+  getReadyNodes,
+  getRevenueShareNodes,
+  setRevenueSharePercent,
+} from './db.js';
 import { onboarding, type MyContext } from './onboarding.js';
 import { provisionNode } from './provision.js';
 import { notifyAdmins } from './admin.js';
 import { checkNodeAlive } from './ssh.js';
 import { logEvent } from './events.js';
 import { decrypt } from './crypto.js';
-import { COMMISSION_PERCENT, commission, revenueReport, syncNode } from './revenue.js';
+import { commission, revenueReport, syncNode } from './revenue.js';
 
 const bot = new Bot<MyContext>(config.botToken);
 
@@ -142,11 +149,47 @@ bot.command('nodes', async (ctx) => {
 // просто игнорируется, как и /nodes.
 bot.command('revenue', async (ctx) => {
   if (!config.adminIds.includes(ctx.from?.id ?? -1)) return;
+  const arg = (ctx.match ?? '').trim();
 
-  // Без аргумента — показываем накопленное; `/revenue sync` идёт по серверам.
-  if ((ctx.match ?? '').trim() === 'sync') {
-    const wait = await ctx.reply('⏳ Обхожу узлы…');
-    const results = await Promise.all(getReadyNodes().map((n) => syncNode(n)));
+  // /revenue share <id> <percent|off> — включить/выключить долю на конкретном
+  // узле. Единственное место, откуда это вообще берётся: по умолчанию НИ У
+  // КОГО доли нет (см. миграция 06.09 в db.ts) — договорённость такого рода
+  // заводится явно, руками, на того одного человека, с кем она реально есть.
+  const shareMatch = arg.match(/^share\s+(\d+)\s+(off|\d{1,3})$/);
+  if (shareMatch) {
+    const nodeId = Number(shareMatch[1]);
+    const node = getNodeById(nodeId);
+    if (!node) {
+      await ctx.reply(`Узла #${nodeId} нет.`);
+      return;
+    }
+    if (shareMatch[2] === 'off') {
+      setRevenueSharePercent(nodeId, null);
+      await ctx.reply(`Доля с продаж для узла #${nodeId} выключена — станок его больше не трогает.`);
+    } else {
+      const percent = Number(shareMatch[2]);
+      if (percent < 1 || percent > 100) {
+        await ctx.reply('Процент — число от 1 до 100.');
+        return;
+      }
+      setRevenueSharePercent(nodeId, percent);
+      await ctx.reply(`Узел #${nodeId} (@${node.tg_username ?? node.server_ip}): включена доля ${percent}%.`);
+    }
+    return;
+  }
+
+  // `/revenue sync` идёт по серверам, но только по тем, где доля реально включена —
+  // ходить в SSH к остальным читать их подписки не за чем и не по праву.
+  if (arg === 'sync') {
+    const wait = await ctx.reply('⏳ Обхожу узлы с включённой долей…');
+    const nodes = getRevenueShareNodes();
+    if (nodes.length === 0) {
+      await ctx.api
+        .editMessageText(ctx.chat.id, wait.message_id, 'Ни у одного узла не включена доля с продаж — обходить некого.')
+        .catch(() => {});
+      return;
+    }
+    const results = await Promise.all(nodes.map((n) => syncNode(n)));
     const failed = results.filter((r) => !r.ok);
     const added = results.reduce((s, r) => s + r.added, 0);
     await ctx.api
@@ -161,21 +204,30 @@ bot.command('revenue', async (ctx) => {
   }
 
   const rows = revenueReport();
+  if (rows.length === 0) {
+    await ctx.reply(
+      'Ни у одного узла не включена доля с продаж — отчёту не по чему считать.\n\n' +
+        '/revenue share <id> <процент|off> — включить/выключить на конкретном узле.',
+    );
+    return;
+  }
   const lines = rows.map((r) => {
     const who = r.username ? '@' + r.username : r.serverIp;
     const week = r.weekStars > 0 ? `${r.weekStars} ⭐ (${r.weekCount})` : '—';
     return (
       `#${r.nodeId} ${who}\n` +
-      `   за неделю: ${week} · твои ${COMMISSION_PERCENT}%: ${commission(r.weekStars)} ⭐\n` +
+      `   за неделю: ${week} · твои ${r.sharePercent}%: ${commission(r.weekStars, r.sharePercent)} ⭐\n` +
       `   всего: ${r.totalStars} ⭐ за ${r.totalCount} продаж` +
       (r.trials ? ` · пробных ${r.trials}` : '')
     );
   });
   const weekTotal = rows.reduce((s, r) => s + r.weekStars, 0);
+  const weekCommission = rows.reduce((s, r) => s + commission(r.weekStars, r.sharePercent), 0);
   await ctx.reply(
-    (lines.length ? lines.join('\n\n') : 'Продаж пока не видно.') +
-      `\n\n💰 Итого за неделю: ${weekTotal} ⭐ · твои ${COMMISSION_PERCENT}%: ${commission(weekTotal)} ⭐` +
-      '\n\n/revenue sync — обойти узлы прямо сейчас',
+    lines.join('\n\n') +
+      `\n\n💰 Итого за неделю: ${weekTotal} ⭐ · твои: ${weekCommission} ⭐` +
+      '\n\n/revenue sync — обойти узлы прямо сейчас' +
+      '\n/revenue share <id> <процент|off> — включить/выключить на узле',
   );
 });
 
@@ -218,14 +270,19 @@ async function monitorNodes(): Promise<void> {
 }
 setInterval(() => void monitorNodes(), 30 * 60 * 1000);
 
-// Сбор выручки узлов: раз в 6 часов молча читаем subs.json каждого узла.
+// Сбор выручки узлов: раз в 6 часов молча читаем subs.json — но ТОЛЬКО у узлов,
+// которым явно включена доля с продаж (см. db.ts::getRevenueShareNodes). До
+// 06.09 это шло по ВСЕМ узлам разом с общим 5% — договорённость такого рода
+// реально была только с одним человеком, для остальных это был необоснованный
+// SSH-заход на чужой сервер и лишний алерт себе же. Пусто по умолчанию — цикл
+// просто ничего не делает, пока кому-то явно не включат.
 //
-// Почему регулярно, а не по запросу: узел может почистить файл, потерять сервер
-// или переустановить бота — увиденная продажа остаётся в базе станка навсегда.
-// Раз в 6 часов, а не раз в сутки: так пропажа сервера отнимает максимум
-// несколько продаж, а не целый день.
+// Почему регулярно, а не по запросу (для тех, кому включено): узел может
+// почистить файл, потерять сервер или переустановить бота — увиденная продажа
+// остаётся в базе станка навсегда. Раз в 6 часов, а не раз в сутки: так пропажа
+// сервера отнимает максимум несколько продаж, а не целый день.
 async function collectRevenue(): Promise<void> {
-  for (const n of getReadyNodes()) {
+  for (const n of getRevenueShareNodes()) {
     const r = await syncNode(n);
     if (r.ok && r.added > 0) {
       await notifyAdmins(bot.api, `💰 Узел #${n.id} (@${n.tg_username ?? n.server_ip}): +${r.added} продаж. /revenue`);

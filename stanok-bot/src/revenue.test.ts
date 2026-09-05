@@ -56,13 +56,40 @@ describe('накопление и процент', () => {
     expect(R.storeSales(42, sales)).toBe(0); // тот же файл прочитан второй раз
   });
 
-  it('процент считается от звёзд', () => {
-    expect(R.COMMISSION_PERCENT).toBe(5);
-    expect(R.commission(100)).toBe(5);
-    expect(R.commission(0)).toBe(0);
+  it('процент считается от звёзд, по явно переданному проценту (не глобальный)', () => {
+    expect(R.commission(100, 5)).toBe(5);
+    expect(R.commission(100, 10)).toBe(10);
+    expect(R.commission(0, 5)).toBe(0);
   });
 
   it('отчёт не падает на пустой базе узлов', () => {
     expect(Array.isArray(R.revenueReport())).toBe(true);
+  });
+
+  // 🔴 06.09: узел без явно включённой доли не должен попадать в отчёт вообще —
+  // до этой миграции отчёт молча включал ВСЕ узлы с общим 5%.
+  it('узел без revenue_share_percent не попадает в отчёт', async () => {
+    const { db } = await import('./db.js');
+    db.prepare(
+      `INSERT INTO nodes (tg_user_id, server_ip, root_password_enc, seller_token_enc)
+       VALUES (999001, '1.2.3.4', 'x', 'y')`,
+    ).run();
+    const rows = R.revenueReport();
+    expect(rows.find((r) => r.serverIp === '1.2.3.4')).toBeUndefined();
+  });
+
+  it('узел с включённой долей попадает в отчёт со своим процентом', async () => {
+    const { db } = await import('./db.js');
+    const info = db
+      .prepare(
+        `INSERT INTO nodes (tg_user_id, server_ip, root_password_enc, seller_token_enc, revenue_share_percent)
+         VALUES (999002, '5.6.7.8', 'x', 'y', 10)`,
+      )
+      .run();
+    const rows = R.revenueReport();
+    const row = rows.find((r) => r.serverIp === '5.6.7.8');
+    expect(row).toBeDefined();
+    expect(row!.sharePercent).toBe(10);
+    expect(row!.nodeId).toBe(Number(info.lastInsertRowid));
   });
 });

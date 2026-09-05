@@ -10,6 +10,15 @@ import { decrypt } from './crypto.js';
 // `events` — это только воронка подключения (дошёл ли человек до provision_ok),
 // а продажи лежат в `subs.json` НА СЕРВЕРЕ УЗЛА.
 //
+// 🔴 06.09: раньше это применялось молча ко ВСЕМ узлам разом (общий 5%) — но
+// договорённость такого рода в реальности была только с одним человеком
+// (Александром, 10%, отдельная история, уже вне этой базы). Для остальных
+// владельцев узлов такой договорённости никто не заключал: заходить к ним по
+// SSH раз в 6 часов читать их подписки и слать себе алерт о их продажах —
+// не страховка, а слежка без согласия. Теперь трогаются только узлы, которым
+// явно включили revenue_share_percent (см. db.ts::getRevenueShareNodes/
+// setRevenueSharePercent, команда /revenue share).
+//
 // 🔒 Читаем молча и только на чтение: один `cat` файла по SSH. Ничего не
 // пишем, ничего не перезапускаем, в боте узла не появляется ни кнопки, ни
 // сообщения. Это страховка владельца, а не отчётность перед узлом.
@@ -17,8 +26,6 @@ import { decrypt } from './crypto.js';
 // 🔴 Копим у себя, а не считаем на лету: файл на узле живёт своей жизнью —
 // узел может его почистить, потерять сервер, переустановить бота. Раз увиденная
 // продажа остаётся в базе станка навсегда.
-
-export const COMMISSION_PERCENT = 5;
 
 const SUBS_PATH = `${REMOTE.SELLER_DATA_DIR}/subs.json`;
 const DAY_MS = 86_400_000;
@@ -150,6 +157,7 @@ export interface NodeRevenue {
   nodeId: number;
   username: string | null;
   serverIp: string;
+  sharePercent: number;
   /** Продажи за период (только платные, пробные не считаются). */
   weekStars: number;
   weekCount: number;
@@ -158,11 +166,13 @@ export interface NodeRevenue {
   trials: number;
 }
 
+/** Только узлы с явно включённой долей — см. комментарий выше зачем. */
 export function revenueReport(days = 7, now = Date.now()): NodeRevenue[] {
   const since = now - days * DAY_MS;
   const rows = db
     .prepare(
       `SELECT n.id AS nodeId, n.tg_username AS username, n.server_ip AS serverIp,
+              n.revenue_share_percent AS sharePercent,
               COALESCE(SUM(CASE WHEN s.stars > 0 AND COALESCE(s.bought_at, 0) >= ? THEN s.stars END), 0) AS weekStars,
               COALESCE(SUM(CASE WHEN s.stars > 0 AND COALESCE(s.bought_at, 0) >= ? THEN 1 END), 0)       AS weekCount,
               COALESCE(SUM(CASE WHEN s.stars > 0 THEN s.stars END), 0)                                   AS totalStars,
@@ -170,6 +180,7 @@ export function revenueReport(days = 7, now = Date.now()): NodeRevenue[] {
               COALESCE(SUM(CASE WHEN s.stars = 0 THEN 1 END), 0)                                         AS trials
          FROM nodes n
          LEFT JOIN node_sales s ON s.node_id = n.id
+        WHERE n.revenue_share_percent IS NOT NULL
         GROUP BY n.id
         ORDER BY totalStars DESC, n.id`,
     )
@@ -177,6 +188,6 @@ export function revenueReport(days = 7, now = Date.now()): NodeRevenue[] {
   return rows;
 }
 
-export function commission(stars: number): number {
-  return Math.round((stars * COMMISSION_PERCENT) / 100);
+export function commission(stars: number, percent: number): number {
+  return Math.round((stars * percent) / 100);
 }

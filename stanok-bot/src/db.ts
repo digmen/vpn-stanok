@@ -32,10 +32,17 @@ db.exec(`
 // (без домена — см. scripts/install-vless-reality.sh) как второй вариант,
 // выбираемый в onboarding.ts. DEFAULT 'amneziawg' — все узлы ДО этой миграции
 // реально им и являются, менять задним числом нечего.
+// Миграция 06.09: раньше собирали продажи и считали комиссию у ВСЕХ узлов разом
+// (глобальный COMMISSION_PERCENT=5% в revenue.ts) — фактическая договорённость о
+// проценте с продаж была только с Александром, и то отдельная (10%, не 5%, и уже
+// вынесена в отдельный форк вне этой базы). Каждому остальному узлу это било
+// молчаливым SSH-заходом раз в 6 часов читать его subs.json без всякого согласия
+// и ненужным алертом админу. NULL по умолчанию = станок узел вообще не трогает.
 for (const sql of [
   `ALTER TABLE nodes ADD COLUMN is_primary INTEGER NOT NULL DEFAULT 0`,
   `ALTER TABLE nodes ADD COLUMN support_key_enc TEXT`,
   `ALTER TABLE nodes ADD COLUMN protocol TEXT NOT NULL DEFAULT 'amneziawg'`,
+  `ALTER TABLE nodes ADD COLUMN revenue_share_percent INTEGER`,
 ]) {
   try {
     db.exec(sql);
@@ -57,6 +64,12 @@ export interface NodeRow {
   is_primary: number;
   support_key_enc: string | null;
   protocol: NodeProtocol;
+  /** NULL = с владельцем узла нет договорённости о доле с продаж (умолчание для
+   *  ВСЕХ узлов) — станок тогда даже не заходит читать его subs.json, см. revenue.ts.
+   *  Заполняется только явно, командой /revenue share, на конкретный узел, если
+   *  такая договорённость реально есть (06.09 — договорённость такого рода была
+   *  только с Александром, и та уже вне этой базы, в отдельном форке). */
+  revenue_share_percent: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -167,4 +180,16 @@ export function setNodeStatus(id: number, status: string): void {
 
 export function setNodeSupportKey(id: number, supportKeyEnc: string): void {
   db.prepare("UPDATE nodes SET support_key_enc = ?, updated_at = datetime('now') WHERE id = ?").run(supportKeyEnc, id);
+}
+
+// Узлы, по которым реально есть договорённость о доле с продаж — только они
+// вообще трогаются сбором выручки (см. revenue.ts::collectRevenue). Пусто по
+// умолчанию для всех, пока кто-то явно не включит через /revenue share.
+export function getRevenueShareNodes(): NodeRow[] {
+  return db.prepare('SELECT * FROM nodes WHERE revenue_share_percent IS NOT NULL ORDER BY id').all() as NodeRow[];
+}
+
+/** Включает/выключает долю с продаж для узла. null — выключить (снова не трогаем). */
+export function setRevenueSharePercent(id: number, percent: number | null): void {
+  db.prepare("UPDATE nodes SET revenue_share_percent = ?, updated_at = datetime('now') WHERE id = ?").run(percent, id);
 }
