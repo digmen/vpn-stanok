@@ -24,19 +24,40 @@ mv "${XRAY_CONF}.tmp" "$XRAY_CONF"
 
 # Живьём через API Xray, без рестарта — тот же принцип, что и в install-vless.sh
 # у Александра: рестарт рвёт сессии ВСЕХ подключённых, а не только нового клиента.
+#
+# 🔴 06.09, живой баг на первом же реальном прогоне: InboundDetour для `adu`
+# обязан нести `listen`/`port`/`protocol`, не только `tag`+`settings` — без них
+# `xray api adu` падает с "Listen on AnyIP but no Port(s) set in InboundDetour"
+# И ПРИ ЭТОМ ВЫХОДИТ С КОДОМ 0 (!), просто печатая "Added 0 user(s) in total" —
+# apply_live() считала это успехом, файл конфига обновлялся, а живой процесс —
+# нет, и следующий клиент получал "invalid request user id" при реальном
+# подключении. Взят рабочий паттерн Александра (add-vless-client.sh): тянуть
+# listen/port/protocol из САМОГО конфига через jq select, не собирать вручную.
+# Плюс не верим exit-коду — парсим "Added N user(s)", 0 считаем провалом.
 apply_live() {
-  local tmp rc
+  local tmp out added
   tmp="$(mktemp)"
-  jq -n --arg tag "reality-in" --arg uuid "$UUID" \
-    '{inbounds: [{tag: $tag, settings: {clients: [{id: $uuid, flow: "xtls-rprx-vision"}]}}]}' > "$tmp"
-  xray api adu --server=127.0.0.1:10085 "$tmp" >/dev/null 2>&1
-  rc=$?
+  jq --arg uuid "$UUID" \
+    '{inbounds: [ .inbounds[] | select(.protocol == "vless") | {tag, listen, port, protocol, settings: {clients: [{id: $uuid, flow: "xtls-rprx-vision"}], decryption: "none"}} ]}' \
+    "$XRAY_CONF" > "$tmp"
+  out="$(xray api adu --server=127.0.0.1:10085 "$tmp" 2>&1)"
   rm -f "$tmp"
-  return $rc
+  added="$(echo "$out" | grep -oE 'Added [0-9]+ user' | grep -oE '[0-9]+' || echo 0)"
+  [ "$added" -gt 0 ]
 }
 
 if ! apply_live; then
-  echo "xray api недоступен — применяю перезапуском (сессии оборвутся)" >&2
+  # 06.09, живой прогон: даже с полным InboundDetour (tag+listen+port+protocol+
+  # settings, ровно как у Александра) `adu` стабильно печатает "Added 0 user(s)"
+  # на Reality-инбаунде конкретно — без ошибки, без диагностики. `rmu` (отзыв)
+  # при этом работает живьём нормально, разницы в форме вызова нет. Похоже на
+  # ограничение самого Xray/Reality (внутреннее состояние подмены сертификата
+  # у Reality может не поддерживать горячее добавление клиента так же, как
+  # обычный TLS/WS-инбаунд, для которого этот приём и был взят у Александра) —
+  # не подтверждено окончательно, но воспроизведено дважды подряд. Рестарт —
+  # рабочий путь, просто не бесплатный (рвёт сессии остальных подключённых);
+  # если найдётся настоящая причина — почистить этот комментарий и убрать fallback.
+  echo "xray api не добавил клиента живьём (известное ограничение Reality-инбаунда, см. комментарий) — применяю перезапуском" >&2
   systemctl restart xray
 fi
 

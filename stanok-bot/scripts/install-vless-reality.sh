@@ -85,13 +85,19 @@ if [ -s "$XRAY_CONF" ] && jq -e '.inbounds[0].streamSettings.realitySettings.pri
 fi
 
 # --- Генерация ключей ---
-# `xray x25519` печатает разными версиями Xray под разными подписями
-# ("PrivateKey"/"Private key" и "Password"/"Public key" — на разных релизах
-# использовалась разная подпись для публичного ключа, "Password" исторически
-# означает именно pbk для клиента). Парсим обе формы, а не одну.
+# `xray x25519` печатает разными версиями Xray под разными подписями. Живьём на
+# 26.3.27 (06.09) формат оказался:
+#   PrivateKey: xxx
+#   Password (PublicKey): xxx
+#   Hash32: xxx
+# — публичный ключ не сразу после "Password"/"Public key" через двоеточие
+# (как ожидалось изначально), а через "Password (PublicKey): xxx". Первая
+# версия regexp это не поймала (падала в тихий exit 1 на первом же реальном
+# прогоне) — теперь матчим по началу строки без требования, что сразу за
+# словом идёт двоеточие, только что колонка "password"/"public" где-то есть.
 KEYGEN_OUT="$(xray x25519)"
-PRIVATE_KEY="$(echo "$KEYGEN_OUT" | grep -iE '^(private ?key)\s*:' | head -1 | sed -E 's/^[^:]+:\s*//')"
-PUBLIC_KEY="$(echo "$KEYGEN_OUT" | grep -iE '^(password|public ?key)\s*:' | head -1 | sed -E 's/^[^:]+:\s*//')"
+PRIVATE_KEY="$(echo "$KEYGEN_OUT" | grep -iE '^(private ?key)' | head -1 | sed -E 's/^[^:]+:\s*//')"
+PUBLIC_KEY="$(echo "$KEYGEN_OUT" | grep -iE '^(password|public ?key)' | head -1 | sed -E 's/^[^:]+:\s*//')"
 if [ -z "$PRIVATE_KEY" ] || [ -z "$PUBLIC_KEY" ]; then
   echo "не смог распарсить вывод xray x25519:" >&2
   echo "$KEYGEN_OUT" >&2
