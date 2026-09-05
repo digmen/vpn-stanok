@@ -7,6 +7,7 @@ import {
   getNodesByUser,
   getReadyNodes,
   getRevenueShareNodes,
+  setNodeHealthOk,
   setRevenueSharePercent,
 } from './db.js';
 import { onboarding, type MyContext } from './onboarding.js';
@@ -134,7 +135,7 @@ bot.command('nodes', async (ctx) => {
     nodes.map(async (n) => {
       const health =
         n.status === 'ready'
-          ? await checkNodeAlive(n.server_ip, decrypt(n.root_password_enc), !!n.is_primary)
+          ? await checkNodeAlive(n.server_ip, decrypt(n.root_password_enc), !!n.is_primary, n.protocol)
           : { ok: false, detail: 'status ≠ ready' };
       return `#${n.id} ${health.ok ? '🟢' : '🔴'} ${n.server_ip} · ${n.status} · @${n.tg_username ?? '—'}${health.ok ? '' : ` · ${health.detail}`}`;
     }),
@@ -251,21 +252,25 @@ bot.catch((err) => console.error('Ошибка бота:', err));
 process.once('SIGINT', () => bot.stop());
 process.once('SIGTERM', () => bot.stop());
 
-// Мониторинг узлов: раз в 30 мин проверяем доступность, алертим админам об изменениях
-const offlineNodes = new Set<number>();
+// Мониторинг узлов: раз в 30 мин проверяем доступность, алертим админам об изменениях.
+//
+// 🔴 06.09: раньше "уже алертили" держалось в offlineNodes — Set в памяти процесса.
+// Несколько деплоев подряд в один день = несколько рестартов станка = Set каждый раз
+// пустой заново, и уже виденные мёртвые узлы слались админу как будто только что
+// обнаружены. Теперь сравниваем с n.last_health_ok из БД (см. db.ts) — переживает рестарт.
 async function monitorNodes(): Promise<void> {
   for (const n of getReadyNodes()) {
-    const health = await checkNodeAlive(n.server_ip, decrypt(n.root_password_enc), !!n.is_primary);
-    if (!health.ok && !offlineNodes.has(n.id)) {
-      offlineNodes.add(n.id);
+    const health = await checkNodeAlive(n.server_ip, decrypt(n.root_password_enc), !!n.is_primary, n.protocol);
+    const wasOk = n.last_health_ok !== 0; // NULL (ещё не проверяли) считаем как "было ок" — не алертить на первой проверке
+    if (!health.ok && wasOk) {
       await notifyAdmins(
         bot.api,
         `🔴 Узел #${n.id} (${n.server_ip}, @${n.tg_username ?? '—'}) недоступен: ${health.detail}`,
       );
-    } else if (health.ok && offlineNodes.has(n.id)) {
-      offlineNodes.delete(n.id);
+    } else if (health.ok && !wasOk) {
       await notifyAdmins(bot.api, `🟢 Узел #${n.id} (${n.server_ip}) снова онлайн.`);
     }
+    setNodeHealthOk(n.id, health.ok);
   }
 }
 setInterval(() => void monitorNodes(), 30 * 60 * 1000);

@@ -3,13 +3,29 @@ import { fileURLToPath } from 'node:url';
 import { NodeSSH } from 'node-ssh';
 import { REMOTE, SSH } from './constants.js';
 import { extractClientConfig } from './parse.js';
-import { testHandshake } from './handshake-test.js';
+import { testHandshake, testVlessRealityHandshake } from './handshake-test.js';
+import type { NodeProtocol } from './db.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // Скрипты выдачи/отзыва пира живут в seller-bot (сосед по репозиторию на
 // станке — deploy.yml заливает оба каталога рядом), а не дублируются здесь.
-const ADD_PEER_SCRIPT = path.resolve(__dirname, '../../seller-bot/scripts/add-amneziawg-peer.sh');
-const REVOKE_PEER_SCRIPT = path.resolve(__dirname, '../../seller-bot/scripts/revoke-amneziawg-peer.sh');
+// Пара на протокол — см. тот же принцип в seller-bot/src/vpn.ts::SCRIPTS.
+//
+// 🔴 06.09, живой инцидент: этот код раньше жёстко звал AmneziaWG-скрипты для
+// ЛЮБОГО узла. После того как AmneziaWG снесли с трёх узлов (мигрированы на
+// VLESS+Reality), монитор начал слать ложные "недоступен: нет awg0.conf —
+// AmneziaWG не установлен" по ним каждые 30 минут — сервер живой, просто
+// проверялся не тем протоколом. Ветка по node.protocol это чинит.
+const SCRIPTS: Record<NodeProtocol, { add: string; revoke: string }> = {
+  amneziawg: {
+    add: path.resolve(__dirname, '../../seller-bot/scripts/add-amneziawg-peer.sh'),
+    revoke: path.resolve(__dirname, '../../seller-bot/scripts/revoke-amneziawg-peer.sh'),
+  },
+  vless_reality: {
+    add: path.resolve(__dirname, '../../seller-bot/scripts/add-vless-reality-peer.sh'),
+    revoke: path.resolve(__dirname, '../../seller-bot/scripts/revoke-vless-reality-peer.sh'),
+  },
+};
 
 export interface RemoteInstallOptions {
   host: string;
@@ -79,7 +95,13 @@ export interface NodeHealth {
 // `isPrimary` — единственное, что теперь по-разному проверяется для primary
 // (он же должен реально держать процесс бота) и вторичных локаций (они его
 // не имеют по дизайну — не спрашиваем).
-export async function checkNodeAlive(host: string, password: string, isPrimary: boolean): Promise<NodeHealth> {
+export async function checkNodeAlive(
+  host: string,
+  password: string,
+  isPrimary: boolean,
+  protocol: NodeProtocol,
+): Promise<NodeHealth> {
+  const scripts = SCRIPTS[protocol];
   const ssh = new NodeSSH();
   let clientPubkey: string | undefined;
   try {
@@ -102,7 +124,7 @@ export async function checkNodeAlive(host: string, password: string, isPrimary: 
     }
 
     const remotePath = '/tmp/health-add-peer.sh';
-    await ssh.putFile(ADD_PEER_SCRIPT, remotePath);
+    await ssh.putFile(scripts.add, remotePath);
     const addRes = await ssh.execCommand(`bash ${remotePath}`);
     if (addRes.code !== 0) {
       return { ok: false, detail: 'не удалось выдать тестовый пир: ' + (addRes.stderr || addRes.stdout).slice(0, 200) };
@@ -114,7 +136,7 @@ export async function checkNodeAlive(host: string, password: string, isPrimary: 
       return { ok: false, detail: 'скрипт выдачи не вернул конфиг' };
     }
 
-    const hs = await testHandshake(config, 8000);
+    const hs = protocol === 'vless_reality' ? await testVlessRealityHandshake(config) : await testHandshake(config, 8000);
     return hs;
   } catch (e) {
     return { ok: false, detail: e instanceof Error ? e.message : String(e) };
@@ -124,7 +146,7 @@ export async function checkNodeAlive(host: string, password: string, isPrimary: 
       // узла — молча, ошибка отзыва не должна портить результат проверки.
       try {
         const revokePath = '/tmp/health-revoke-peer.sh';
-        await ssh.putFile(REVOKE_PEER_SCRIPT, revokePath);
+        await ssh.putFile(scripts.revoke, revokePath);
         await ssh.execCommand(`bash ${revokePath} ${shellQuote(clientPubkey)}`);
       } catch {
         /* не критично — переживёт мусорную запись до следующей ревокации */

@@ -43,6 +43,7 @@ for (const sql of [
   `ALTER TABLE nodes ADD COLUMN support_key_enc TEXT`,
   `ALTER TABLE nodes ADD COLUMN protocol TEXT NOT NULL DEFAULT 'amneziawg'`,
   `ALTER TABLE nodes ADD COLUMN revenue_share_percent INTEGER`,
+  `ALTER TABLE nodes ADD COLUMN last_health_ok INTEGER`,
 ]) {
   try {
     db.exec(sql);
@@ -70,6 +71,12 @@ export interface NodeRow {
    *  такая договорённость реально есть (06.09 — договорённость такого рода была
    *  только с Александром, и та уже вне этой базы, в отдельном форке). */
   revenue_share_percent: number | null;
+  /** Последний известный результат мониторинга (1/0), NULL = ещё не проверяли.
+   *  Хранится в БД, а не в памяти процесса — раньше был in-memory Set в
+   *  monitorNodes(), и он обнулялся при каждом рестарте станка (а 06.09 их
+   *  было несколько подряд), из-за чего уже виденные "офлайн" узлы слались
+   *  админу заново на каждом деплое, будто обнаружены только что. */
+  last_health_ok: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -192,4 +199,15 @@ export function getRevenueShareNodes(): NodeRow[] {
 /** Включает/выключает долю с продаж для узла. null — выключить (снова не трогаем). */
 export function setRevenueSharePercent(id: number, percent: number | null): void {
   db.prepare("UPDATE nodes SET revenue_share_percent = ?, updated_at = datetime('now') WHERE id = ?").run(percent, id);
+}
+
+/** Результат последней проверки монитора — переживает рестарт станка (см. комментарий у поля). */
+export function setNodeHealthOk(id: number, ok: boolean): void {
+  db.prepare('UPDATE nodes SET last_health_ok = ? WHERE id = ?').run(ok ? 1 : 0, id);
+}
+
+/** Пометить узел потерянным — монитор и рассылки его больше не трогают (getReadyNodes
+ *  его не вернёт). Тот же приём, что уже применялся вручную 30.08 для узла #11. */
+export function markNodeLost(id: number): void {
+  db.prepare("UPDATE nodes SET status = 'lost', updated_at = datetime('now') WHERE id = ?").run(id);
 }
