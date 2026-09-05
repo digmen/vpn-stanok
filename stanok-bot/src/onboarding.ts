@@ -149,37 +149,16 @@ async function ipThatAnswers(
   }
 }
 
-// Спрашивает протокол кнопками. Заведено 05.09 вместе с VLESS+Reality —
-// до этого станок ставил только AmneziaWG, выбирать было не из чего.
-// AmneziaWG — кнопка первой и с пометкой «обычный»: это протокол по умолчанию
-// уже месяц в бою, VLESS+Reality — новый путь, без домена, честно подписан
-// «эксперимент», чтобы не создавать впечатление проверенной альтернативы.
-async function askProtocol(conversation: MyConversation, ctx: MyContext, track: Track): Promise<'amneziawg' | 'vless_reality'> {
-  const kb = new InlineKeyboard()
-    .text('🥷 AmneziaWG (обычный)', 'proto:amneziawg')
-    .row()
-    .text('🌀 VLESS+Reality (эксперимент, без домена)', 'proto:vless_reality');
-  const msg = await ctx.reply(
-    '0️⃣ Какой протокол поставить?\n\n' +
-      '🥷 AmneziaWG — обычный путь, работает уже давно.\n' +
-      '🌀 VLESS+Reality — маскируется под чужой настоящий сайт, держит обычную блокировку и ' +
-      'блок UDP, но не переживает «белый список» (эксперимент, если не уверен — жми первую).',
-    { reply_markup: kb },
-  );
-
-  for (;;) {
-    const upd = await conversation.wait();
-    const data = upd.callbackQuery?.data;
-    if (data) await upd.answerCallbackQuery().catch(() => {});
-    if (data === 'proto:amneziawg' || data === 'proto:vless_reality') {
-      await del(ctx, msg.message_id);
-      const protocol = data === 'proto:vless_reality' ? 'vless_reality' : 'amneziawg';
-      await track('protocol_chosen', protocol);
-      return protocol;
-    }
-    // Не та кнопка / текст мимо — переспрашиваем тем же сообщением, не плодим новые.
-  }
-}
+// РЕШЕНИЕ 06.09: AmneziaWG новым узлам больше не предлагаем вообще — только
+// VLESS+Reality. Заведённая 05.09 кнопка выбора (AmneziaWG/VLESS+Reality)
+// снята: пока был выбор, это была честная развилка «обычный путь vs
+// эксперимент», но раз VLESS+Reality теперь единственный путь для новых
+// узлов — спрашивать нечего, лишний шаг в онбординге. Существующие узлы,
+// заведённые ДО этого решения, остаются на своём протоколе как есть — их
+// никто не переустанавливает (см. nodes.protocol DEFAULT 'amneziawg', эта
+// колонка и вся ветка выбора скрипта в provision.ts никуда не делись, они
+// продолжают обслуживать старые узлы).
+const NEW_NODE_PROTOCOL: 'vless_reality' = 'vless_reality';
 
 // Диалог онбординга: IP → проверка связи → root-пароль → [токен бота-продавца, только
 // если это ПЕРВЫЙ сервер владельца].
@@ -200,7 +179,7 @@ export async function onboarding(conversation: MyConversation, ctx: MyContext) {
   const primary = await conversation.external(() => getPrimaryReadyNode(from.id));
 
   const ip = await ipThatAnswers(conversation, ctx, from.id, track);
-  const protocol = await askProtocol(conversation, ctx, track);
+  const protocol = NEW_NODE_PROTOCOL;
 
   const rootPassword = await askStep(conversation, ctx, {
     video: config.videos.password,

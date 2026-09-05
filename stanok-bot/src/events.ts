@@ -29,7 +29,6 @@ export const FUNNEL_STEPS = [
   'setup_click', // «Настроить» — начало ввода данных
   'ip_ok', // прислал синтаксически годный IP
   'preflight_ok', // сервер ответил на 22 — главный порог
-  'protocol_chosen', // выбрал AmneziaWG или VLESS+Reality (заведено 05.09)
   'password_ok', // отдал root-пароль
   'token_ok', // отдал токен бота-продавца
   'provision_click', // нажал «Поднять VPN»

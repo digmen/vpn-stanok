@@ -3,7 +3,7 @@ import { config } from './config.js';
 import { promoEnabled } from './branding.js';
 import { createVpnPeer, createVpnPeerAt, createVpnPeersEverywhere, revokePeerAt, type Peer } from './vpn.js';
 import { activeClients, addSubscription, getExpiredPeers, removePeer, revenueStars } from './subscriptions.js';
-import { offerConfig, offerConfigs, registerDeliveryHandlers } from './delivery.js';
+import { APPS, offerConfig, offerConfigs, registerDeliveryHandlers } from './delivery.js';
 import {
   addRemote,
   allLocations,
@@ -17,6 +17,7 @@ import {
   renameLocation,
   saveKey,
   updateRemoteHost,
+  type VpnProtocol,
 } from './locations.js';
 import { attachServer, ping } from './ssh.js';
 import { claimOwnerIfUnset, getOwnerId } from './owner.js';
@@ -38,11 +39,30 @@ import {
 const bot = new Bot(config.botToken);
 registerDeliveryHandlers(bot);
 
-const APP_LINKS =
-  '📱 Приложение AmneziaVPN — в него импортируется ключ:\n\n' +
-  '• Android: https://play.google.com/store/apps/details?id=org.amnezia.vpn\n' +
-  '• iPhone, компьютер и остальные: https://amnezia.org/downloads\n\n' +
-  'Поставь приложение заранее — после оплаты пришлю ключ, его нужно будет открыть в нём.';
+/**
+ * До 06.09 это была статичная строка про AmneziaVPN — правильно, пока протокол
+ * был один. Теперь у владельца могут одновременно быть локации на AmneziaWG
+ * (старые, никто не заставляет их переустанавливать) и на VLESS+Reality (новые —
+ * решено 06.09 не предлагать AmneziaWG новым узлам вообще). Кнопка «Установить
+ * приложение» не знает заранее, каким ключом человек в итоге воспользуется —
+ * поэтому показывает приложения под ВСЕ протоколы, которые реально есть у
+ * владельца прямо сейчас, а не гадает. Точная пара «этот ключ → то приложение»
+ * всё равно едет отдельно вместе с самим ключом (см. delivery.ts) — это
+ * подстраховка на случай, если человек ставит приложение заранее.
+ */
+function appLinksText(): string {
+  const protocols = new Set(allLocations().map((l) => l.protocol));
+  const blocks = [...protocols].map((p) => {
+    const a = APPS[p];
+    return `📱 ${a.name}:\n• Android: ${a.android}\n• iPhone: ${a.ios}`;
+  });
+  const intro =
+    protocols.size > 1
+      ? 'У тебя сервера на разных протоколах — какой ключ придёт, для того приложение и ставь ' +
+        '(это будет ясно из подписи к ключу, у каждого своя кнопка приложения):\n\n'
+      : '';
+  return intro + blocks.join('\n\n') + '\n\nПоставь приложение заранее — после оплаты пришлю ключ.';
+}
 
 // Владелец вводит значение текстом. Одно ожидание за раз — состояние простое и не переживает
 // перезапуск специально: зависшее ожидание не должно жевать чужие сообщения.
@@ -73,7 +93,7 @@ function welcomeText(): string {
   return (
     s.welcome.text ??
     'Быстрый VPN за ⭐️ Telegram Stars.\n\n' +
-      'Выбери срок кнопкой ниже — после оплаты пришлю ключ для приложения AmneziaVPN.' +
+      'Выбери срок кнопкой ниже — после оплаты пришлю ключ и приложение под него.' +
       (s.trial.enabled ? '\n\nЕсть бесплатный пробный период — кнопка ниже.' : '')
   );
 }
@@ -134,13 +154,13 @@ bot.callbackQuery('menu', async (ctx) => {
 });
 
 async function sendApps(ctx: any): Promise<void> {
-  await ctx.reply(APP_LINKS, { link_preview_options: { is_disabled: true } });
+  await ctx.reply(appLinksText(), { link_preview_options: { is_disabled: true } });
 }
 
 const HELP_TEXT =
   '❓ Как это работает:\n\n' +
   '1. Выбери срок кнопкой 🛒 и оплати звёздами Telegram.\n' +
-  '2. Пришлю ключ — открой его в приложении AmneziaVPN (кнопка 📱 «Установить приложение»).\n' +
+  '2. Пришлю ключ — вместе с ним будет кнопка на нужное приложение под этот ключ.\n' +
   '3. Готово, VPN работает. Ключ можно переключать между странами прямо в приложении.\n\n' +
   'Если ключ не пришёл или что-то не так — напиши сюда же, владелец бота поможет.';
 
@@ -200,7 +220,7 @@ bot.on('message:successful_payment', async (ctx) => {
     days,
     { userId: ctx.from.id, username: ctx.from.username, stars: pay.total_amount },
   );
-  await offerConfigs(ctx.api, ctx.chat.id, peers.map((p) => ({ config: p.config, title: p.locTitle })));
+  await offerConfigs(ctx.api, ctx.chat.id, peers.map((p) => ({ config: p.config, title: p.locTitle, protocol: p.protocol })));
 });
 
 // ── пробный период ────────────────────────────────────────────────────────
@@ -224,8 +244,8 @@ async function giveTrial(ctx: any): Promise<void> {
     username: ctx.from?.username,
     stars: 0,
   });
-  await offerConfig(ctx.api, ctx.chat!.id, peer.config, peer.locTitle);
-  await ctx.reply(`🎁 Пробный доступ на ${s.trial.days} дн. активен. Приложение — кнопка «Установить приложение».`);
+  await offerConfig(ctx.api, ctx.chat!.id, peer.config, peer.locTitle, peer.protocol);
+  await ctx.reply(`🎁 Пробный доступ на ${s.trial.days} дн. активен. Приложение — кнопка ниже, вместе с ключом.`);
 }
 
 bot.callbackQuery('trial', async (ctx) => {
@@ -570,18 +590,18 @@ bot.callbackQuery('free', async (ctx) => {
   if (!isOwner(ctx.from?.id)) return;
   const chatId = ctx.chat!.id;
 
-  const toSend: { config: string; title: string }[] = [];
+  const toSend: { config: string; title: string; protocol: VpnProtocol }[] = [];
   const failed: { title: string; reason: string }[] = [];
   for (const loc of allLocations()) {
     const existing = readOwnerConfig(loc.id);
     if (existing) {
-      toSend.push({ config: existing, title: loc.title });
+      toSend.push({ config: existing, title: loc.title, protocol: loc.protocol });
       continue;
     }
     try {
       const peer = await createVpnPeerAt(loc);
       saveOwnerConfig(loc.id, peer.config);
-      toSend.push({ config: peer.config, title: peer.locTitle });
+      toSend.push({ config: peer.config, title: peer.locTitle, protocol: peer.protocol });
     } catch (e) {
       failed.push({ title: loc.title, reason: e instanceof Error ? e.message : String(e) });
     }

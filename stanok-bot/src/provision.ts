@@ -131,7 +131,7 @@ export async function provisionNode(
       const kb = uname ? new InlineKeyboard().url('🚀 Открыть моего бота', `https://t.me/${uname}`) : undefined;
       const appLine =
         node.protocol === 'vless_reality'
-          ? 'Клиентам он продаёт VPN за ⭐️. Для подключения — приложение v2rayNG (Android) / OneXray (iPhone).'
+          ? 'Клиентам он продаёт VPN за ⭐️. Для подключения — приложение OneXray (и Android, и iPhone).'
           : 'Клиентам он продаёт VPN за ⭐️. Для подключения — приложение AmneziaVPN.';
       await show(
         '🎉 Готово! Твой VPN-бизнес запущен.\n\n' +

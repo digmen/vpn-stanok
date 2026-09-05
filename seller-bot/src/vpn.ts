@@ -33,6 +33,8 @@ export interface Peer {
   loc: string;
   /** Человеческое название локации для подписи конфига клиенту. */
   locTitle: string;
+  /** Протокол этой локации — какое приложение/инструкцию показать (см. delivery.ts). */
+  protocol: VpnProtocol;
 }
 
 /** Разбор вывода скрипта одинаков и локально, и по SSH — он один и тот же скрипт. */
@@ -65,7 +67,7 @@ export async function createVpnPeerAt(loc: Location): Promise<Peer> {
     // У основного сервера отдельного адреса в боте нет — оставляем как пришло.
     const host = loc.kind === 'ssh' ? loc.remote?.host : undefined;
     const finalConfig = host ? (loc.protocol === 'vless_reality' ? withVlessHost(config, host) : withEndpointHost(config, host)) : config;
-    return { config: finalConfig, pubkey, loc: loc.id, locTitle: loc.title };
+    return { config: finalConfig, pubkey, loc: loc.id, locTitle: loc.title, protocol: loc.protocol };
   } catch (e: unknown) {
     throw new Error(shortError(e));
   }
