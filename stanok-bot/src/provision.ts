@@ -9,6 +9,7 @@ import { testHandshake, testVlessRealityHandshake } from './handshake-test.js';
 import { deploySeller, getBotUsername } from './deploy-seller.js';
 import { attachLocationToPrimary } from './attach-location.js';
 import { registerNodeDns } from './dns.js';
+import { testFromRussia } from './ru-probe.js';
 import { notifyAdmins } from './admin.js';
 import { checkSshPort, preflightMessage } from './preflight.js';
 import { logEvent } from './events.js';
@@ -113,6 +114,27 @@ export async function provisionNode(
       return;
     }
 
+    // 🔴 07.09: одного handshake со станка недостаточно — станок сам в Праге, а
+    // целевая аудитория продукта в РФ. Найдено живьём: узел проходит проверку
+    // отсюда и при этом недостижим для настоящего клиента внутри РФ (белый список
+    // на некоторых маршрутах — не про протокол, про хостинг/страну). Проверяем
+    // честно, вторым независимым клиентом из РФ. Best-effort — не блокирует
+    // готовность узла (для не-РФ клиентов он всё равно рабочий), только предупреждает.
+    let ruWarning = '';
+    if (node.protocol === 'vless_reality') {
+      const ru = await testFromRussia(firstClientConfig);
+      if (ru && !ru.ok) {
+        ruWarning = `\n\n⚠️ Важно: проверка из России показала, что этот сервер там недоступен ` +
+          `(${ru.detail}). Для клиентов не из РФ всё будет работать нормально, но если целевая ` +
+          `аудитория — Россия, стоит рассмотреть смену хостинга/страны сервера.`;
+        await notifyAdmins(
+          api,
+          `⚠️ Узел #${nodeId} (${node.server_ip}) прошёл проверку со станка, но НЕ отвечает ` +
+            `российскому тестовому клиенту: ${ru.detail}`,
+        );
+      }
+    }
+
     if (node.is_primary) {
       await show('✅ VPN установлен. ⚙️ Запускаю твоего бота-продавца… ещё пара минут.');
 
@@ -138,7 +160,8 @@ export async function provisionNode(
       await show(
         '🎉 Готово! Твой VPN-бизнес запущен.\n\n' +
           'Открой своего бота → /start → «🆓 Мой VPN» — заберёшь свой VPN там.\n' +
-          appLine,
+          appLine +
+          ruWarning,
         kb,
       );
     } else {
@@ -172,7 +195,8 @@ export async function provisionNode(
       const kb = uname ? new InlineKeyboard().url('🚀 Открыть моего бота', `https://t.me/${uname}`) : undefined;
       await show(
         `🎉 Готово! Сервер ${node.server_ip} добавлен как ещё одна точка в твоём боте.\n\n` +
-          'Открывать его отдельно не нужно — он уже там, в списке локаций.',
+          'Открывать его отдельно не нужно — он уже там, в списке локаций.' +
+          ruWarning,
         kb,
       );
     }

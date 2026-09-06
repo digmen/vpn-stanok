@@ -53,4 +53,11 @@ export const config = {
     apiKey: process.env.PDNS_API_KEY ?? '',
     zone: process.env.PDNS_ZONE ?? '',
   },
+  // Тестовый российский сервер (см. Систем/Серверы (реестр)) — единственный способ
+  // честно проверить, что новый узел реально доступен для целевой аудитории (клиенты
+  // в РФ), а не только со станка. Пусто → RU-проба тихо пропускается. См. ru-probe.ts.
+  ruProbe: {
+    host: process.env.RU_PROBE_HOST ?? '',
+    sshKeyPath: process.env.RU_PROBE_SSH_KEY_PATH ?? '',
+  },
 };
