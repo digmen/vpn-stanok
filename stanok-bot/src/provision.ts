@@ -8,6 +8,7 @@ import { runRemoteInstall } from './ssh.js';
 import { testHandshake, testVlessRealityHandshake } from './handshake-test.js';
 import { deploySeller, getBotUsername } from './deploy-seller.js';
 import { attachLocationToPrimary } from './attach-location.js';
+import { registerNodeDns } from './dns.js';
 import { notifyAdmins } from './admin.js';
 import { checkSshPort, preflightMessage } from './preflight.js';
 import { logEvent } from './events.js';
@@ -126,6 +127,7 @@ export async function provisionNode(
       });
 
       setNodeStatus(nodeId, 'ready');
+      void registerNodeDns(nodeId, node.server_ip);
       logEvent(who, 'provision_ok', node.server_ip);
       const uname = await getBotUsername(sellerToken);
       const kb = uname ? new InlineKeyboard().url('🚀 Открыть моего бота', `https://t.me/${uname}`) : undefined;
@@ -164,6 +166,7 @@ export async function provisionNode(
       setNodeSupportKey(nodeId, encrypt(supportPrivateKey));
 
       setNodeStatus(nodeId, 'ready');
+      void registerNodeDns(nodeId, node.server_ip);
       logEvent(who, 'provision_ok', node.server_ip);
       const uname = await getBotUsername(decrypt(primary.seller_token_enc));
       const kb = uname ? new InlineKeyboard().url('🚀 Открыть моего бота', `https://t.me/${uname}`) : undefined;

@@ -46,4 +46,11 @@ export const config = {
     password: process.env.INSTR_PASSWORD_VIDEO ?? '',
     token: process.env.INSTR_TOKEN_VIDEO ?? '',
   },
+  // PowerDNS на этом же (пражском) сервере — см. dns.ts. Пусто → регистрация
+  // поддомена узла просто тихо пропускается, на сам провижининг не влияет.
+  pdns: {
+    apiUrl: process.env.PDNS_API_URL ?? 'http://127.0.0.1:8081/api/v1/servers/localhost',
+    apiKey: process.env.PDNS_API_KEY ?? '',
+    zone: process.env.PDNS_ZONE ?? '',
+  },
 };
