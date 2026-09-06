@@ -56,14 +56,19 @@ export async function testFromRussia(vlessLink: string, waitMs = 6000): Promise<
   // Один SSH-вызов, полностью самоочищающийся: пишет конфиг, поднимает временный xray,
   // тянет реальный HTTP-запрос через SOCKS, гасит процесс и чистит файлы — не оставляет
   // следов на чужом (по факту — нашем же) сервере при сбое посередине.
-  // Без `set -e`: pkill/rm тут ожидаемо иногда возвращают ненулевой код (процесс уже
-  // сам умер, файла уже нет) — это не признак провала самого теста, только curl решает.
+  // 🔴 `pkill -f "xray run -c ...json"` — ловушка: этот же текст буквально входит в
+  // командную строку САМОГО удалённого shell'а, выполняющего весь этот скрипт (он же
+  // получен как один аргумент ssh), так что pkill по паттерну матчит и себя тоже —
+  // shell убивает сам себя, SSH возвращает 255, хотя curl уже успел отдать результат
+  // (поймано живьём 07.09 — stdout был верный, exit code врал). Убиваем по точному
+  // PID через `$!`, паттерн никого больше не ищет.
   const remoteScript =
     `printf '%s' '${clientConfig.replace(/'/g, "'\\''")}' > /root/probe-${tag}.json; ` +
     `nohup xray run -c /root/probe-${tag}.json > /root/probe-${tag}.log 2>&1 & ` +
+    `XPID=$!; ` +
     `sleep ${Math.ceil(waitMs / 1000)}; ` +
     `curl -s -x socks5h://127.0.0.1:${socksPort} --max-time 8 https://api.ipify.org; ` +
-    `pkill -f "xray run -c /root/probe-${tag}.json" >/dev/null 2>&1; ` +
+    `kill "$XPID" >/dev/null 2>&1; ` +
     `rm -f /root/probe-${tag}.json /root/probe-${tag}.log; ` +
     `exit 0`;
 
