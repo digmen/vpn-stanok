@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { config } from './config.js';
-import { PRIMARY_LOCATION_ID, type VpnProtocol } from './locations.js';
+import { getClientEndpoint, PRIMARY_LOCATION_ID, type VpnProtocol } from './locations.js';
 
 // Конфиг владельца храним один раз НА ЛОКАЦИЮ и переиспользуем — чтобы не
 // плодить пиры на каждый клик. До 26.08 файл хранил ОДИН конфиг вообще
@@ -18,9 +18,18 @@ const FILE = path.join(config.dataDir, 'owner-configs.json');
 // OneXray получал не тот формат вообще. Пойман по жалобе @pisa_roty_shoti (узел #12):
 // «взял ключ, не работает». С этого коммита запись хранит ещё и протокол, под которым
 // была сгенерирована — если протокол локации сменился, кэш считается устаревшим сам.
+//
+// 🔴 07.09, тем же вечером: тот же класс бага, второй раз за один заход. Узлу #12
+// включили релей (см. relay.ts) уже ПОСЛЕ того, как в кэше лежал рабочий на вид
+// vless_reality-конфиг (протокол не менялся, значит по прежней проверке кэш "свежий") —
+// а по факту он вёл клиента напрямую на узел, где трафик душится до нуля, мимо релея.
+// Теперь запись хранит ещё и адрес релея на момент генерации — несовпадение с текущим
+// (релей включили/выключили/сменили порт) тоже считается устаревшим кэшем.
 interface OwnerEntry {
   config: string;
   protocol: VpnProtocol;
+  /** Адрес релея на момент генерации (`host:port`) или `'-'`, если релея не было. */
+  relayKey: string;
 }
 
 type OwnerConfigs = Record<string, OwnerEntry | string>;
@@ -68,16 +77,31 @@ function configOf(entry: OwnerEntry | string): string {
   return typeof entry === 'string' ? entry : entry.config;
 }
 
-/** null — кэша нет ИЛИ он от другого протокола (устарел после миграции локации). */
+/** Записи без relayKey (старый формат — до самого релея) — считаем «релея не было»,
+ *  тем же значением, что и currentRelayKey() отдаёт при выключенном релее. Так старые
+ *  записи не считаются устаревшими зря, если у локации и правда никогда не было релея. */
+function relayKeyOf(entry: OwnerEntry | string): string {
+  return typeof entry === 'string' ? '-' : entry.relayKey;
+}
+
+function currentRelayKey(locId: string): string {
+  const r = getClientEndpoint(locId);
+  return r ? `${r.host}:${r.port}` : '-';
+}
+
+/** null — кэша нет, ИЛИ он от другого протокола (миграция локации), ИЛИ сгенерирован
+ *  до/после смены релея (включили, выключили или сменили порт) — в обоих случаях кэш
+ *  считается устаревшим, вызывающий код сам перегенерирует актуальным путём. */
 export function readOwnerConfig(locId: string, currentProtocol: VpnProtocol): string | null {
   const entry = load()[locId];
   if (!entry) return null;
   if (protocolOf(entry) !== currentProtocol) return null;
+  if (relayKeyOf(entry) !== currentRelayKey(locId)) return null;
   return configOf(entry);
 }
 
 export function saveOwnerConfig(locId: string, cfg: string, protocol: VpnProtocol): void {
   const all = load();
-  all[locId] = { config: cfg, protocol };
+  all[locId] = { config: cfg, protocol, relayKey: currentRelayKey(locId) };
   save(all);
 }
