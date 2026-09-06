@@ -578,14 +578,14 @@ bot.callbackQuery('free', async (ctx) => {
   const toSend: { config: string; title: string; protocol: VpnProtocol }[] = [];
   const failed: { title: string; reason: string }[] = [];
   for (const loc of allLocations()) {
-    const existing = readOwnerConfig(loc.id);
+    const existing = readOwnerConfig(loc.id, loc.protocol);
     if (existing) {
       toSend.push({ config: existing, title: loc.title, protocol: loc.protocol });
       continue;
     }
     try {
       const peer = await createVpnPeerAt(loc);
-      saveOwnerConfig(loc.id, peer.config);
+      saveOwnerConfig(loc.id, peer.config, peer.protocol);
       toSend.push({ config: peer.config, title: peer.locTitle, protocol: peer.protocol });
     } catch (e) {
       failed.push({ title: loc.title, reason: e instanceof Error ? e.message : String(e) });
