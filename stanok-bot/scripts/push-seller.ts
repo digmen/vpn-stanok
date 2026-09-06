@@ -31,6 +31,7 @@ async function pushOne(n: NodeRow): Promise<{ ok: boolean; why?: string }> {
       ownerId: n.tg_user_id,
       stanokUrl: config.stanokUrl,
       priceStars: config.sellerPriceStars,
+      protocol: n.protocol,
     });
     return { ok: true };
   } catch (e) {

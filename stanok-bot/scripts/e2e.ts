@@ -192,6 +192,7 @@ async function cmdRun(): Promise<void> {
     ownerId: Number(process.env.E2E_OWNER_ID ?? 0),
     stanokUrl: 'https://t.me/VPNForge_bot',
     priceStars: 1,
+    protocol: 'amneziawg',
   });
   console.log('    ✅ продавец задеплоен и запущен');
 }
