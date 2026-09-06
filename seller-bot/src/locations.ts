@@ -207,6 +207,47 @@ export function updateRemoteHost(id: string, host: string, port?: number): boole
   return true;
 }
 
+// 🔴 07.09: мультихоп-релей через Прагу для узлов, недоступных из РФ напрямую
+// (см. ru-probe.ts на станке — узел проходит проверку со станка, но не с
+// российского клиента, из-за фильтрации на самом маршруте, не из-за протокола).
+// Отдельный файл, не поле RemoteLocation: адрес для SSH-управления (host/port
+// выше) должен остаться направленным НА САМ узел — станок продолжает заходить
+// туда напрямую для поддержки/мониторинга. Меняется только то, что получает
+// в качестве адреса КЛИЕНТ в готовой ссылке. Работает и для 'local' (основной
+// сервер владельца) — у него отдельного host вообще нет в структуре выше.
+const CLIENT_ENDPOINT_FILE = path.join(config.dataDir, 'client-endpoint-overrides.json');
+
+interface ClientEndpointOverride {
+  host: string;
+  port: number;
+}
+
+function readClientEndpoints(): Record<string, ClientEndpointOverride> {
+  if (!existsSync(CLIENT_ENDPOINT_FILE)) return {};
+  try {
+    const raw = JSON.parse(readFileSync(CLIENT_ENDPOINT_FILE, 'utf8')) as unknown;
+    return raw && typeof raw === 'object' ? (raw as Record<string, ClientEndpointOverride>) : {};
+  } catch {
+    return {};
+  }
+}
+
+export function getClientEndpoint(locationId: string): ClientEndpointOverride | undefined {
+  return readClientEndpoints()[locationId];
+}
+
+export function setClientEndpoint(locationId: string, host: string, port: number): void {
+  const all = readClientEndpoints();
+  all[locationId] = { host, port };
+  writeFileSync(CLIENT_ENDPOINT_FILE, JSON.stringify(all, null, 2));
+}
+
+export function clearClientEndpoint(locationId: string): void {
+  const all = readClientEndpoints();
+  delete all[locationId];
+  writeFileSync(CLIENT_ENDPOINT_FILE, JSON.stringify(all, null, 2));
+}
+
 export function renameLocation(id: string, title: string): void {
   const clean = title.trim().slice(0, LOCATION_LIMITS.MAX_TITLE_LEN);
   if (!clean) return;

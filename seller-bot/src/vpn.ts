@@ -3,8 +3,8 @@ import { promisify } from 'node:util';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PEER_SCRIPT_TIMEOUT_MS } from './constants.js';
-import { extractClientConfig, withEndpointHost, withVlessHost } from './parse.js';
-import { allLocations, findLocation, PRIMARY_LOCATION_ID, type Location, type VpnProtocol } from './locations.js';
+import { extractClientConfig, withEndpointHost, withVlessHost, withVlessHostPort } from './parse.js';
+import { allLocations, findLocation, getClientEndpoint, PRIMARY_LOCATION_ID, type Location, type VpnProtocol } from './locations.js';
 import { runScript } from './ssh.js';
 
 const execFileP = promisify(execFile);
@@ -66,7 +66,16 @@ export async function createVpnPeerAt(loc: Location): Promise<Peer> {
     // withVlessHost) — какую именно функцию звать, решает протокол локации.
     // У основного сервера отдельного адреса в боте нет — оставляем как пришло.
     const host = loc.kind === 'ssh' ? loc.remote?.host : undefined;
-    const finalConfig = host ? (loc.protocol === 'vless_reality' ? withVlessHost(config, host) : withEndpointHost(config, host)) : config;
+    // 🔴 07.09: релей-переадресация (см. locations.ts::getClientEndpoint) стоит
+    // ВЫШЕ обычного host-фикса — если для этой локации включён релей, клиент
+    // должен получить адрес релея (Прага + свой порт), а не адрес самого узла,
+    // даже если тот тоже указан. uuid/pbk/sid клиента не трогаем — они настоящие.
+    const relay = loc.protocol === 'vless_reality' ? getClientEndpoint(loc.id) : undefined;
+    const finalConfig = relay
+      ? withVlessHostPort(config, relay.host, relay.port)
+      : host
+        ? (loc.protocol === 'vless_reality' ? withVlessHost(config, host) : withEndpointHost(config, host))
+        : config;
     return { config: finalConfig, pubkey, loc: loc.id, locTitle: loc.title, protocol: loc.protocol };
   } catch (e: unknown) {
     throw new Error(shortError(e));

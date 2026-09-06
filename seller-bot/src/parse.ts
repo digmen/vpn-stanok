@@ -44,3 +44,16 @@ export function withEndpointHost(config: string, host: string): string {
 export function withVlessHost(link: string, host: string): string {
   return link.replace(/^(vless:\/\/[^@]+@)[^:/?#]+(:)/i, `$1${host}$2`);
 }
+
+/**
+ * То же самое, что withVlessHost, но переписывает и порт — нужно для
+ * мультихоп-релея (07.09): узлы, до которых из РФ не достучаться напрямую
+ * (см. ru-probe.ts на станке), отдают клиенту ссылку не на себя, а на
+ * пражский релей на отдельном порту, который прозрачно перекидывает байты
+ * дальше на настоящий узел. uuid/pbk/sid/sni клиента остаются ЕГО РЕАЛЬНЫМИ —
+ * релей ничего не расшифровывает и не подменяет, просто TCP-проброс, поэтому
+ * подписки/отзыв продолжают работать как раньше, без всяких изменений.
+ */
+export function withVlessHostPort(link: string, host: string, port: number): string {
+  return link.replace(/^(vless:\/\/[^@]+@)[^:/?#]+:\d+/i, `$1${host}:${port}`);
+}

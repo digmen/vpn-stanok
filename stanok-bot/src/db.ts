@@ -44,6 +44,8 @@ for (const sql of [
   `ALTER TABLE nodes ADD COLUMN protocol TEXT NOT NULL DEFAULT 'amneziawg'`,
   `ALTER TABLE nodes ADD COLUMN revenue_share_percent INTEGER`,
   `ALTER TABLE nodes ADD COLUMN last_health_ok INTEGER`,
+  `ALTER TABLE nodes ADD COLUMN relay_host TEXT`,
+  `ALTER TABLE nodes ADD COLUMN relay_port INTEGER`,
 ]) {
   try {
     db.exec(sql);
@@ -77,6 +79,11 @@ export interface NodeRow {
    *  было несколько подряд), из-за чего уже виденные "офлайн" узлы слались
    *  админу заново на каждом деплое, будто обнаружены только что. */
   last_health_ok: number | null;
+  /** Мультихоп-релей через Прагу (07.09) — заполнено, если узел не проходит
+   *  RU-пробу напрямую (см. ru-probe.ts) и клиенты идут через проброс отсюда.
+   *  NULL у всех, кому релей не нужен. */
+  relay_host: string | null;
+  relay_port: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -204,6 +211,11 @@ export function setRevenueSharePercent(id: number, percent: number | null): void
 /** Результат последней проверки монитора — переживает рестарт станка (см. комментарий у поля). */
 export function setNodeHealthOk(id: number, ok: boolean): void {
   db.prepare('UPDATE nodes SET last_health_ok = ? WHERE id = ?').run(ok ? 1 : 0, id);
+}
+
+/** Включает релей — станок сам проброс уже настроил (relay.ts), тут только запись факта. */
+export function setNodeRelay(id: number, host: string, port: number): void {
+  db.prepare("UPDATE nodes SET relay_host = ?, relay_port = ?, updated_at = datetime('now') WHERE id = ?").run(host, port, id);
 }
 
 /** Пометить узел потерянным — монитор и рассылки его больше не трогают (getReadyNodes

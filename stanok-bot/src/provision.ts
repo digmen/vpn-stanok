@@ -3,13 +3,14 @@ import { fileURLToPath } from 'node:url';
 import { InlineKeyboard, type Api } from 'grammy';
 import { config } from './config.js';
 import { decrypt, encrypt } from './crypto.js';
-import { getNodeById, getPrimaryReadyNode, setNodeStatus, setNodeSupportKey, type NodeProtocol } from './db.js';
+import { getNodeById, getPrimaryReadyNode, setNodeRelay, setNodeStatus, setNodeSupportKey, type NodeProtocol } from './db.js';
 import { runRemoteInstall } from './ssh.js';
 import { testHandshake, testVlessRealityHandshake } from './handshake-test.js';
 import { deploySeller, getBotUsername } from './deploy-seller.js';
 import { attachLocationToPrimary } from './attach-location.js';
 import { registerNodeDns } from './dns.js';
 import { testFromRussia } from './ru-probe.js';
+import { enableRelay } from './relay.js';
 import { notifyAdmins } from './admin.js';
 import { checkSshPort, preflightMessage } from './preflight.js';
 import { logEvent } from './events.js';
@@ -120,17 +121,20 @@ export async function provisionNode(
     // на некоторых маршрутах — не про протокол, про хостинг/страну). Проверяем
     // честно, вторым независимым клиентом из РФ. Best-effort — не блокирует
     // готовность узла (для не-РФ клиентов он всё равно рабочий), только предупреждает.
+    // 🔴 07.09: если RU-проба провалилась — не только предупреждаем, но и сами
+    // включаем мультихоп-релей через Прагу (см. relay.ts), подтверждённый вживую
+    // способ обхода (Москва→Прага→узел проходит там, где Москва→узел — нет).
+    // Только для is_primary (у relay.ts::pushRelayToNode локация всегда 'local') —
+    // доп. локации владельца пока не покрыты, это отдельный заход.
     let ruWarning = '';
+    let ruFailed: Awaited<ReturnType<typeof testFromRussia>> = null;
     if (node.protocol === 'vless_reality') {
-      const ru = await testFromRussia(firstClientConfig);
-      if (ru && !ru.ok) {
-        ruWarning = `\n\n⚠️ Важно: проверка из России показала, что этот сервер там недоступен ` +
-          `(${ru.detail}). Для клиентов не из РФ всё будет работать нормально, но если целевая ` +
-          `аудитория — Россия, стоит рассмотреть смену хостинга/страны сервера.`;
+      ruFailed = await testFromRussia(firstClientConfig);
+      if (ruFailed && !ruFailed.ok) {
         await notifyAdmins(
           api,
           `⚠️ Узел #${nodeId} (${node.server_ip}) прошёл проверку со станка, но НЕ отвечает ` +
-            `российскому тестовому клиенту: ${ru.detail}`,
+            `российскому тестовому клиенту: ${ruFailed.detail}`,
         );
       }
     }
@@ -150,6 +154,27 @@ export async function provisionNode(
 
       setNodeStatus(nodeId, 'ready');
       void registerNodeDns(nodeId, node.server_ip);
+
+      // 🔴 07.09: RU-проба провалилась — сами включаем релей, не только предупреждаем.
+      // Seller-bot уже задеплоен строкой выше — cli-set-relay.ts там точно есть.
+      if (ruFailed && !ruFailed.ok) {
+        try {
+          const relay = await enableRelay(node, password);
+          setNodeRelay(nodeId, relay.host, relay.port);
+          ruWarning =
+            '\n\n✅ Заметил, что из России сервер напрямую недоступен, и уже включил обход — ' +
+            'клиенты подключаются автоматически через запасной маршрут, ничего делать не нужно.';
+          await notifyAdmins(api, `🔀 Узел #${nodeId}: включён релей через Прагу (${relay.host}:${relay.port}).`);
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          ruWarning =
+            `\n\n⚠️ Важно: проверка из России показала, что этот сервер там недоступен ` +
+            `(${ruFailed.detail}), а автоматически включить обход не получилось (${msg.slice(0, 150)}). ` +
+            `Если целевая аудитория — Россия, стоит рассмотреть смену хостинга/страны сервера.`;
+          await notifyAdmins(api, `⚠️ Узел #${nodeId}: релей не включился автоматически: ${msg.slice(0, 300)}`);
+        }
+      }
+
       logEvent(who, 'provision_ok', node.server_ip);
       const uname = await getBotUsername(sellerToken);
       const kb = uname ? new InlineKeyboard().url('🚀 Открыть моего бота', `https://t.me/${uname}`) : undefined;
@@ -190,6 +215,20 @@ export async function provisionNode(
 
       setNodeStatus(nodeId, 'ready');
       void registerNodeDns(nodeId, node.server_ip);
+
+      // Авто-релей тут не делаем (relay.ts нацелен на location 'local', это
+      // локация владельца, а не отдельная запись) — только честно предупреждаем.
+      if (ruFailed && !ruFailed.ok) {
+        ruWarning =
+          `\n\n⚠️ Важно: проверка из России показала, что эта локация там недоступна ` +
+          `(${ruFailed.detail}). Для клиентов не из РФ всё будет работать нормально.`;
+        await notifyAdmins(
+          api,
+          `⚠️ Узел #${nodeId} (${node.server_ip}, доп. локация) прошёл проверку со станка, но НЕ ` +
+            `отвечает российскому тестовому клиенту: ${ruFailed.detail}`,
+        );
+      }
+
       logEvent(who, 'provision_ok', node.server_ip);
       const uname = await getBotUsername(decrypt(primary.seller_token_enc));
       const kb = uname ? new InlineKeyboard().url('🚀 Открыть моего бота', `https://t.me/${uname}`) : undefined;
