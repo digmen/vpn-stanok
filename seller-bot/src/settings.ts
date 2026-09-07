@@ -20,8 +20,17 @@ export interface Package {
 export interface Settings {
   packages: Package[];
   trial: { enabled: boolean; days: number };
+  /** Напоминание клиенту за N дней до конца подписки (см. reminders.ts). Включено по
+   *  умолчанию: до 08.09 бот молча отзывал ключ в момент истечения, и человек узнавал
+   *  об окончании тем, что интернет перестал работать. */
+  reminder: { enabled: boolean; days: number };
   welcome: { text: string | null; photo: string | null };
 }
+
+/** За сколько дней предупреждать — владелец выбирает из этого списка.
+ *  Тип readonly number[], а не `as const`: значение приходит из настроек на диске
+ *  обычным number, и литеральный тип заставлял бы приводить его на каждой проверке. */
+export const REMINDER_DAYS: readonly number[] = [1, 2, 3];
 
 export const LIMITS = {
   MAX_PACKAGES: 6,
@@ -64,6 +73,7 @@ function fresh(): Settings {
   return {
     packages: defaultPackages(legacyPrice(), config.days),
     trial: { enabled: false, days: 3 },
+    reminder: { enabled: true, days: 2 },
     welcome: { text: null, photo: null },
   };
 }
@@ -86,6 +96,13 @@ export function normalize(raw: unknown): Settings {
     trial: {
       enabled: Boolean(r.trial?.enabled),
       days: isValidDays(Number(r.trial?.days)) ? Number(r.trial!.days) : base.trial.days,
+    },
+    // Поля нет у всех настроек, записанных до 08.09 — тогда берём умолчание «включено».
+    // Именно поэтому проверяем на undefined, а не Boolean(...): иначе у всех старых
+    // ботов напоминания молча оказались бы выключенными.
+    reminder: {
+      enabled: r.reminder?.enabled === undefined ? base.reminder.enabled : Boolean(r.reminder.enabled),
+      days: REMINDER_DAYS.includes(Number(r.reminder?.days)) ? Number(r.reminder!.days) : base.reminder.days,
     },
     welcome: {
       text: typeof r.welcome?.text === 'string' ? r.welcome.text.slice(0, LIMITS.MAX_WELCOME_LEN) : null,

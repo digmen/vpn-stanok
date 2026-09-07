@@ -1,6 +1,7 @@
 import { Bot, InlineKeyboard, Keyboard } from 'grammy';
 import { config } from './config.js';
 import { promoEnabled } from './branding.js';
+import { markReminded, pendingReminders } from './reminders.js';
 import { createVpnPeer, createVpnPeerAt, createVpnPeersEverywhere, revokePeerAt, type Peer } from './vpn.js';
 import { activeClients, addSubscription, getExpiredPeers, removePeer, revenueStars } from './subscriptions.js';
 import { APPS, offerConfig, offerConfigs, registerDeliveryHandlers } from './delivery.js';
@@ -33,6 +34,7 @@ import {
   LIMITS,
   nextPackageId,
   packageLabel,
+  REMINDER_DAYS,
   updateSettings,
 } from './settings.js';
 
@@ -261,6 +263,8 @@ function adminMenu(): InlineKeyboard {
     .text('💲 Тарифы', 'tariffs')
     .text('🎁 Пробный период', 'trialcfg')
     .row()
+    .text('🔔 Напоминания', 'remcfg')
+    .row()
     .text('✍️ Приветствие', 'wtext')
     .text('🖼 Фото', 'wphoto')
     .row()
@@ -382,6 +386,50 @@ bot.callbackQuery('trialcfg', async (ctx) => {
       { reply_markup: kb },
     )
     .catch(() => {});
+});
+
+// Напоминания об окончании подписки — настройка владельца.
+// Дни переключаются по кругу (1→2→3), а не вводом с клавиатуры: вариантов всего три,
+// и лишний шаг «пришли число» тут только мешает.
+bot.callbackQuery('remcfg', async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!isOwner(ctx.from?.id)) return;
+  const s = getSettings();
+  const kb = new InlineKeyboard()
+    .text(s.reminder.enabled ? '🔴 Выключить' : '🟢 Включить', 'remtoggle')
+    .text(`📅 За ${s.reminder.days} дн.`, 'remdays')
+    .row()
+    .text('← Назад', 'admin');
+  await ctx
+    .editMessageText(
+      `🔔 Напоминания об окончании
+
+` +
+        `Сейчас: ${s.reminder.enabled ? `включены, за ${s.reminder.days} дн. до конца` : 'выключены'}
+
+` +
+        `Клиент получит сообщение с кнопками продления до того, как ключ перестанет работать.`,
+      { reply_markup: kb },
+    )
+    .catch(() => {});
+});
+
+bot.callbackQuery('remtoggle', async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!isOwner(ctx.from?.id)) return;
+  const s = updateSettings((cur) => ({ ...cur, reminder: { ...cur.reminder, enabled: !cur.reminder.enabled } }));
+  await showAdmin(ctx, s.reminder.enabled ? '🟢 Напоминания включены.' : '🔴 Напоминания выключены.');
+});
+
+bot.callbackQuery('remdays', async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!isOwner(ctx.from?.id)) return;
+  const s = updateSettings((cur) => {
+    const i = REMINDER_DAYS.indexOf(cur.reminder.days);
+    const next = REMINDER_DAYS[(i + 1) % REMINDER_DAYS.length];
+    return { ...cur, reminder: { ...cur.reminder, days: next } };
+  });
+  await showAdmin(ctx, `📅 Напоминание за ${s.reminder.days} дн. до окончания.`);
 });
 
 bot.callbackQuery('trialtoggle', async (ctx) => {
@@ -950,6 +998,38 @@ process.once('SIGTERM', () => bot.stop());
 
 setInterval(() => void sweepExpired(), 60 * 60 * 1000); // проверка истёкших раз в час
 void sweepExpired();
+
+// Напоминания об окончании подписки. Раз в час, тем же ритмом, что и отзыв истёкших:
+// точность до часа тут достаточная, а отдельный таймер только плодил бы сущности.
+//
+// Помечаем отправленным ДАЖЕ при ошибке отправки: самая частая причина — человек
+// заблокировал бота, и повторять ему каждый час бессмысленно. Один срок — одно
+// напоминание, что бы ни случилось.
+async function sweepReminders(): Promise<void> {
+  const s = getSettings();
+  if (!s.reminder.enabled) return;
+  for (const r of pendingReminders(s.reminder.days)) {
+    const when = r.daysLeft <= 0 ? 'сегодня' : r.daysLeft === 1 ? 'завтра' : `через ${r.daysLeft} дн.`;
+    const kb = new InlineKeyboard();
+    for (const p of getSettings().packages) kb.text(packageLabel(p), `buy:${p.id}`).row();
+    try {
+      await bot.api.sendMessage(
+        r.userId,
+        `⏳ Твой VPN заканчивается ${when}.
+
+` +
+          `Чтобы не остаться без доступа, продли заранее — ключ останется тот же, ` +
+          `ничего перенастраивать не нужно.`,
+        { reply_markup: kb },
+      );
+    } catch (e) {
+      console.error('Не смог напомнить клиенту', r.userId, e instanceof Error ? e.message : e);
+    }
+    markReminded(r.key);
+  }
+}
+setInterval(() => void sweepReminders(), 60 * 60 * 1000);
+void sweepReminders();
 
 await bot.start({
   onStart: (info) => console.log(`Бот-продавец @${info.username} запущен, версия ${currentVersion()}`),
