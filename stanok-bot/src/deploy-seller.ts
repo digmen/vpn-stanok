@@ -93,6 +93,63 @@ export async function deploySeller(opts: DeployOpts): Promise<void> {
   }
 }
 
+// Меняет токен у УЖЕ развёрнутого бота-продавца и перезапускает его: не полный передеплой
+// (код и data-папка на месте), только строка SELLER_BOT_TOKEN в .env.
+//
+// 🔴 07.09: заведено после инцидента с отозванным токеном (см. bot-token.ts) — раньше
+// единственным способом сменить токен был полный передеплой через онбординг, а он ещё и
+// переиспользовал СТАРЫЙ токен, то есть починить это владелец не мог никак.
+//
+// `pm2 restart --update-env` обязателен: без --update-env pm2 поднимет процесс со старым
+// окружением, и новый токен просто не подхватится (эту грабли в проекте уже ловили).
+export async function updateSellerToken(host: string, password: string, token: string): Promise<void> {
+  const ssh = new NodeSSH();
+  await ssh.connect({
+    host,
+    username: SSH.USERNAME,
+    password,
+    port: SSH.PORT,
+    readyTimeout: SSH.READY_TIMEOUT_MS,
+    tryKeyboard: true,
+  });
+  try {
+    const envPath = `${REMOTE.SELLER_DIR}/.env`;
+    // Токен передаём через переменную окружения удалённого шелла, а не в тексте команды —
+    // иначе он светится в списке процессов (ps) на чужом сервере.
+    const res = await ssh.execCommand(
+      `grep -v '^SELLER_BOT_TOKEN=' ${envPath} > ${envPath}.tmp; ` +
+        `printf 'SELLER_BOT_TOKEN=%s\\n' "$NEW_TOKEN" >> ${envPath}.tmp; ` +
+        `mv ${envPath}.tmp ${envPath}; chmod 600 ${envPath}; ` +
+        `cd ${REMOTE.SELLER_DIR} && pm2 restart seller-bot --update-env`,
+      { execOptions: { env: { NEW_TOKEN: token } } },
+    );
+    if (res.code !== 0) {
+      throw new Error('не удалось применить новый токен: ' + (res.stderr || res.stdout).slice(0, 300));
+    }
+  } finally {
+    ssh.dispose();
+  }
+}
+
+/** Гасит бота-продавца на узле. Нужно, когда он всё равно не может работать (мёртвый токен) —
+ *  иначе pm2 будет вечно поднимать падающий процесс и жечь CPU на сервере владельца. */
+export async function stopSellerBot(host: string, password: string): Promise<void> {
+  const ssh = new NodeSSH();
+  await ssh.connect({
+    host,
+    username: SSH.USERNAME,
+    password,
+    port: SSH.PORT,
+    readyTimeout: SSH.READY_TIMEOUT_MS,
+    tryKeyboard: true,
+  });
+  try {
+    await ssh.execCommand('pm2 stop seller-bot');
+  } finally {
+    ssh.dispose();
+  }
+}
+
 // Спрашивает у Telegram username бота по токену — чтобы дать узлу ссылку на его бота.
 export async function getBotUsername(token: string): Promise<string | null> {
   try {

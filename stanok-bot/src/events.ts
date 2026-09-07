@@ -51,7 +51,19 @@ export type SideStep =
   | 'secondary_node'
   // Прошлый primary владельца оказался физически недоступен — новый сервер занял
   // его место, старый снят с primary/ready (см. onboarding.ts, фикс 07.09).
-  | 'primary_replaced';
+  | 'primary_replaced'
+  // Telegram отверг токен (401) — отозван в @BotFather. Раньше это никак не отслеживалось
+  // и кончалось вечным циклом перезапусков бота-продавца (см. bot-token.ts, инцидент 07.09).
+  | 'token_invalid'
+  | 'token_updated'
+  | 'token_update_fail'
+  // Прислали токен, уже занятый другим владельцем (списан из инструкции/чужого видео) —
+  // два процесса с одним токеном валят друг друга (409 Conflict), ловим до установки.
+  | 'token_taken'
+  // Свободный текст в чате со станком, вне мастера настройки — чтобы видеть, как люди
+  // на самом деле пользуются ботом (просьба 07.09). Секреты сюда не попадают: шаги
+  // с паролем и токеном обрабатывает мастер, до этого журнала они не доходят.
+  | 'chat_message';
 
 export interface EventRow {
   id: number;
@@ -74,6 +86,21 @@ export function logEvent(
   } catch {
     /* журнал не должен ронять бота */
   }
+}
+
+/** Было ли такое событие у этого человека за последние N часов.
+ *  Нужно, чтобы не долбить одним и тем же алертом на каждом проходе монитора: состояние
+ *  берётся из БД, а не из памяти процесса — иначе оно обнуляется на каждом деплое станка
+ *  (эту грабли в проекте уже ловили с offlineNodes, см. db.ts::last_health_ok). */
+export function hadRecentEvent(tgUserId: number, step: FunnelStep | SideStep, withinHours: number): boolean {
+  const row = db
+    .prepare(
+      `SELECT 1 FROM events
+        WHERE tg_user_id = ? AND step = ? AND created_at > datetime('now', ?)
+        LIMIT 1`,
+    )
+    .get(tgUserId, step, `-${withinHours} hours`);
+  return row !== undefined;
 }
 
 // Весь путь одного человека — по @username или по telegram id.

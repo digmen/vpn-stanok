@@ -6,15 +6,19 @@ import {
   getNodeById,
   getNodesByUser,
   getReadyNodes,
+  getReadyPrimaryNodes,
   getRevenueShareNodes,
   setNodeHealthOk,
   setRevenueSharePercent,
 } from './db.js';
-import { onboarding, type MyContext } from './onboarding.js';
+import { TOKEN_INVALID_HELP, verifyBotToken } from './bot-token.js';
+import { stopSellerBot } from './deploy-seller.js';
+import { onboarding, updateToken, type MyContext } from './onboarding.js';
 import { provisionNode } from './provision.js';
 import { notifyAdmins } from './admin.js';
 import { checkNodeAlive } from './ssh.js';
-import { logEvent } from './events.js';
+import { hadRecentEvent, logEvent } from './events.js';
+import { isValidBotToken } from './validate.js';
 import { decrypt } from './crypto.js';
 import { commission, revenueReport, syncNode } from './revenue.js';
 import { backupAllPrimaries } from './backup.js';
@@ -24,6 +28,7 @@ const bot = new Bot<MyContext>(config.botToken);
 bot.use(session({ initial: () => ({}) }));
 bot.use(conversations());
 bot.use(createConversation(onboarding));
+bot.use(createConversation(updateToken));
 
 // ── Шаг 1: купить сервер ────────────────────────────────────────────────
 bot.command('start', async (ctx) => {
@@ -121,7 +126,12 @@ bot.command('status', async (ctx) => {
 });
 
 bot.command('help', async (ctx) => {
-  await ctx.reply('/start — начать\n/status — статус твоих серверов');
+  await ctx.reply('/start — начать\n/status — статус твоих серверов\n/token — заменить токен бота-продавца');
+});
+
+// Смена токена бота-продавца без повторной настройки сервера (см. onboarding.ts::updateToken).
+bot.command('token', async (ctx) => {
+  await ctx.conversation.enter('updateToken');
 });
 
 // Мониторинг всех узлов (только админ): статус + живая проверка доступности
@@ -247,7 +257,30 @@ bot.on(['message:video', 'message:animation', 'message:document', 'message:photo
   }
 });
 
-bot.catch((err) => console.error('Ошибка бота:', err));
+// Свободные сообщения в чате со станком — чтобы видеть, как люди на самом деле пользуются
+// ботом (его просьба 07.09: «кажется, что люди не так пользуются моим ботом»). До 07.09
+// в журнал попадали только шаги воронки, без единого слова человека — и понять, что он
+// пытался сделать и где застрял, было нельзя.
+//
+// 🔒 Почему это не нарушает правило «в журнал не попадают секреты» (events.ts):
+// обработчик стоит ПОСЛЕ мастера настройки, а мастер съедает сообщения своих шагов — то есть
+// root-пароль и токен, которые вводят внутри мастера, сюда физически не доходят. Плюс страховка
+// ниже: строку, похожую на токен бота, не пишем никогда, даже если она пришла вне мастера.
+bot.on('message:text', async (ctx) => {
+  const text = ctx.message.text.trim();
+  if (text.startsWith('/')) return; // команды уже видны как отдельные шаги
+  if (isValidBotToken(text)) return; // на всякий случай: токен в журнал не кладём никогда
+  logEvent(ctx.from, 'chat_message', text.slice(0, 200));
+});
+
+bot.catch((err) => {
+  console.error('Ошибка бота:', err);
+  // 🔴 07.09, его прямая просьба: «когда ошибки вылезают — пусть мой бот оповещает».
+  // Раньше падение обработчика умирало в логах pm2 на сервере, и о поломке узнавали
+  // только когда кто-то жаловался, что бот молчит.
+  const where = err.ctx?.from?.username ? `@${err.ctx.from.username}` : String(err.ctx?.from?.id ?? '—');
+  void notifyAdmins(bot.api, `❌ Ошибка в станке (у ${where}): ${String(err.error).slice(0, 400)}`);
+});
 
 // Аккуратная остановка
 process.once('SIGINT', () => bot.stop());
@@ -275,6 +308,47 @@ async function monitorNodes(): Promise<void> {
   }
 }
 setInterval(() => void monitorNodes(), 30 * 60 * 1000);
+
+// Проверка токенов ботов-продавцов: раз в час.
+//
+// 🔴 07.09, живой инцидент (Ramazan_LS): владелец перевыпустил токен в @BotFather, бот-продавец
+// перестал логиниться в Telegram, упал — и pm2 поднимал его 2333 раза, держа 100% CPU на его же
+// сервере. Не заметил никто: владелец видел молчащего бота, монитор смотрел на сервер и VPN,
+// но не на сам процесс. Теперь: находим сами, гасим бесполезный цикл перезапусков и просим
+// у владельца новый токен его же словами, без диагностики.
+//
+// 'network' (Telegram недоступен, 429/5xx) НЕ считаем отказом — иначе на первом же сбое
+// Telegram мы бы разослали всем владельцам, что у них «отозван токен», и погасили рабочих ботов.
+async function monitorSellerTokens(): Promise<void> {
+  for (const n of getReadyPrimaryNodes()) {
+    const verdict = await verifyBotToken(decrypt(n.seller_token_enc));
+    if (verdict.ok || verdict.reason === 'network') continue;
+
+    // Раз в сутки на владельца, а не на каждом проходе — состояние в БД, переживает рестарт.
+    if (hadRecentEvent(n.tg_user_id, 'token_invalid', 24)) continue;
+    logEvent({ id: n.tg_user_id, username: n.tg_username ?? undefined }, 'token_invalid', `узел #${n.id}, монитор`);
+
+    // Гасим падающий процесс: с мёртвым токеном он всё равно бесполезен, а CPU жрёт.
+    let stopped = '';
+    try {
+      await stopSellerBot(n.server_ip, decrypt(n.root_password_enc));
+      stopped = ' Бесполезный перезапуск бота на сервере остановлен.';
+    } catch {
+      /* сервер недоступен — не страшно, главное сообщить владельцу */
+    }
+
+    await bot.api
+      .sendMessage(n.tg_user_id, TOKEN_INVALID_HELP + '\n\nКогда будет новый токен — пришли его командой /token.')
+      .catch(() => {});
+    await notifyAdmins(
+      bot.api,
+      `🔑 Узел #${n.id} (${n.server_ip}, @${n.tg_username ?? '—'}): токен бота-продавца отозван, бот не работал.` +
+        `${stopped} Владельцу написал.`,
+    );
+  }
+}
+setInterval(() => void monitorSellerTokens(), 60 * 60 * 1000);
+void monitorSellerTokens(); // первый заход сразу при старте
 
 // Сбор выручки узлов: раз в 6 часов молча читаем subs.json — но ТОЛЬКО у узлов,
 // которым явно включена доля с продаж (см. db.ts::getRevenueShareNodes). До

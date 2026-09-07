@@ -2,9 +2,12 @@ import type { Conversation, ConversationFlavor } from '@grammyjs/conversations';
 import { InlineKeyboard, type Context } from 'grammy';
 import { config } from './config.js';
 import { decrypt, encrypt } from './crypto.js';
-import { demoteNode, findNodeByIpOfOtherUser, getPrimaryNodeAny, getPrimaryReadyNode, setReplacedNodeId, upsertNode } from './db.js';
+import { demoteNode, findNodeByIpOfOtherUser, getAllNodes, getPrimaryNodeAny, getPrimaryReadyNode, setReplacedNodeId, setSellerTokenForUser, upsertNode } from './db.js';
+import { notifyAdmins } from './admin.js';
 import { logEvent, type FunnelStep, type SideStep } from './events.js';
 import { checkSshPort, preflightMessage } from './preflight.js';
+import { verifyBotToken } from './bot-token.js';
+import { updateSellerToken } from './deploy-seller.js';
 import { checkIp, ipProblemMessage, isNonEmptySecret, isValidBotToken } from './validate.js';
 
 export type MyContext = Context & ConversationFlavor;
@@ -60,6 +63,72 @@ async function askStep(
     if (err === null) return text;
     if (opts.onReject) await opts.onReject(text);
     errId = (await ctx.reply(err)).message_id;
+  }
+}
+
+// Спрашивает токен, пока не пришлют ТАКОЙ, который реально принимает Telegram.
+//
+// 🔴 07.09: раньше проверялся только формат строки (`isValidBotToken`) — синтаксически годный,
+// но отозванный токен проходил насквозь, разворачивался на сервер и там падал в вечный
+// цикл перезапусков (см. bot-token.ts, инцидент с 2333 рестартами). Теперь формат — только
+// первый фильтр, а решает живой ответ getMe.
+/** Есть ли уже ДРУГОЙ владелец с этим же токеном. Сравнивать шифротексты нельзя (каждый
+ *  раз новый IV — одинаковые токены дают разные строки), поэтому расшифровываем и сравниваем
+ *  открытые значения. Узлов десятки, не тысячи — дешевле, чем хранить хэш отдельной колонкой. */
+function ownerOfToken(token: string, exceptTgUserId: number): number | null {
+  for (const n of getAllNodes()) {
+    if (n.tg_user_id === exceptTgUserId) continue;
+    try {
+      if (decrypt(n.seller_token_enc) === token) return n.tg_user_id;
+    } catch {
+      /* запись зашифрована другим ключом или битая — пропускаем, это не совпадение */
+    }
+  }
+  return null;
+}
+
+async function askWorkingToken(
+  conversation: MyConversation,
+  ctx: MyContext,
+  track: Track,
+  tgUserId: number,
+  firstPrompt: string,
+): Promise<string> {
+  let prompt = firstPrompt;
+  for (;;) {
+    const token = await askStep(conversation, ctx, {
+      video: config.videos.token,
+      prompt,
+      validate: (s) =>
+        isValidBotToken(s) ? null : '❌ Это не похоже на токен бота. Пример: 123456789:AAH... Пришли ещё раз:',
+    });
+
+    // Чужой токен: два процесса с одним токеном дерутся за getUpdates (409 Conflict) и
+    // валят друг друга — в этом проекте так уже ломались боты дважды (25.08, Германия и
+    // Амстердам). Тогда причиной был свой же второй сервер, но человек может прислать и
+    // чужой токен (списал из инструкции/видео) — эффект тот же, ловим здесь.
+    const takenBy = await conversation.external(() => ownerOfToken(token, tgUserId));
+    if (takenBy) {
+      await track('token_taken');
+      prompt =
+        '❌ Этот токен уже используется другим ботом в системе — скорее всего он списан из ' +
+        'инструкции или чужого видео.\n\nЗаведи своего бота: @BotFather → /newbot — и пришли ' +
+        'его токен:';
+      continue;
+    }
+
+    const verdict = await conversation.external(() => verifyBotToken(token));
+    // Сеть моргнула — это не вина человека и не приговор токену: берём как есть,
+    // дальше его всё равно проверит провижининг перед установкой.
+    if (verdict.ok || verdict.reason === 'network') {
+      await track('token_ok');
+      return token;
+    }
+    await track('token_invalid');
+    prompt =
+      '❌ Telegram не принимает этот токен (отвечает «Unauthorized»).\n\n' +
+      'Скорее всего он уже перевыпущен. Возьми актуальный: @BotFather → /mybots → твой бот → ' +
+      '«API Token» — и пришли сюда:';
   }
 }
 
@@ -171,6 +240,84 @@ const NEW_NODE_PROTOCOL: 'vless_reality' = 'vless_reality';
 // спрашиваем, а новый сервер после провижининга уходит не в deploySeller, а в
 // attachLocationToPrimary (см. provision.ts) — становится ДОПОЛНИТЕЛЬНОЙ локацией внутри
 // уже работающего бота, без второго процесса.
+// Отдельный, короткий путь «у меня перевыпущен токен» — без повторного онбординга.
+// Владельцу не нужно заново вводить IP и пароль: сервер уже настроен, меняется одна строка
+// в .env бота-продавца и процесс перезапускается (см. deploy-seller.ts::updateSellerToken).
+//
+// 🔴 07.09: заведено вместе с проверкой токена. Раньше такого пути не было вообще — человек
+// с отозванным токеном оставался с молчащим ботом и ничего не мог сделать сам.
+export async function updateToken(conversation: MyConversation, ctx: MyContext) {
+  const from = ctx.from!;
+  const track: Track = (step, detail) =>
+    conversation.external(() => logEvent({ id: from.id, username: from.username }, step, detail));
+
+  // 🔴 Намеренно `getPrimaryNodeAny`, а НЕ `getPrimaryReadyNode`: смена токена не должна
+  // зависеть от того, в каком состоянии сейчас узел. Именно в состоянии 'error' (установка
+  // не доехала как раз из-за мёртвого токена) она и нужна больше всего — а проверка на
+  // 'ready' закрыла бы человеку единственный выход. Токен не должен зависеть ни от кэша,
+  // ни от внутреннего состояния станка.
+  const primary = await conversation.external(() => getPrimaryNodeAny(from.id));
+  if (!primary) {
+    await ctx.reply(
+      'У тебя ещё нет ни одной заявки на сервер — токен пока некуда записывать.\n' +
+        'Нажми /start, я проведу по шагам.',
+    );
+    return;
+  }
+
+  const token = await askWorkingToken(
+    conversation,
+    ctx,
+    track,
+    from.id,
+    '🔑 Пришли новый токен бота-продавца.\n' +
+      'Взять его: @BotFather → /mybots → твой бот → «API Token».',
+  );
+
+  // Сохраняем СРАЗУ, до попытки применить на сервере. Даже если сервер сейчас недоступен,
+  // новый токен уже в базе — им воспользуется ближайшая установка. Так смена токена не может
+  // «сломаться на полпути» и оставить человека со старым мёртвым значением.
+  await conversation.external(() => setSellerTokenForUser(from.id, encrypt(token)));
+  await track('token_updated', `сохранён, узел #${primary.id}`);
+
+  const status = await ctx.reply('⚙️ Применяю новый токен и перезапускаю бота…');
+  try {
+    await conversation.external(() =>
+      updateSellerToken(primary.server_ip, decrypt(primary.root_password_enc), token),
+    );
+    const verdict = await conversation.external(() => verifyBotToken(token));
+    const kb =
+      verdict.ok && verdict.username
+        ? new InlineKeyboard().url('🚀 Открыть моего бота', `https://t.me/${verdict.username}`)
+        : undefined;
+    await ctx.api
+      .editMessageText(ctx.chat!.id, status.message_id, '✅ Готово — бот снова работает. Проверь: напиши ему /start.', {
+        reply_markup: kb,
+      })
+      .catch(() => {});
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    await track('token_update_fail', msg.slice(0, 150));
+    await conversation.external(() =>
+      notifyAdmins(
+        ctx.api,
+        `🔑 Узел #${primary.id} (${primary.server_ip}, @${from.username ?? from.id}): новый токен сохранён в базе, ` +
+          `но применить его на сервере не вышло: ${msg.slice(0, 300)}`,
+      ),
+    );
+    await ctx.api
+      .editMessageText(
+        ctx.chat!.id,
+        status.message_id,
+        '✅ Новый токен сохранён — старый больше нигде не используется.\n\n' +
+          `⚠️ Но применить его прямо сейчас на сервере не получилось: ${msg.slice(0, 200)}\n\n` +
+          'Похоже, сервер недоступен. Когда он оживёт — нажми /start → «Я купил сервер» → «Настроить», ' +
+          'и я подниму бота уже с новым токеном. Заново вводить токен не придётся.',
+      )
+      .catch(() => {});
+  }
+}
+
 export async function onboarding(conversation: MyConversation, ctx: MyContext) {
   const from = ctx.from!;
   const track: Track = (step, detail) =>
@@ -193,22 +340,42 @@ export async function onboarding(conversation: MyConversation, ctx: MyContext) {
   await track('password_ok'); // сам пароль в журнал не попадает — только факт
 
   // Токен бота-продавца у владельца всегда ОДИН (он один раз завёл его в BotFather) —
-  // если уже видели хоть одну его заявку в primary, переспрашивать нечего, берём
-  // сохранённый, что бы ни случилось дальше с самим сервером.
+  // если уже видели хоть одну его заявку в primary, переспрашивать нечего, берём сохранённый.
+  //
+  // 🔴 07.09: но только если Telegram его ещё принимает. Пере-использование вслепую я завёл
+  // этим же утром вместе с заменой primary — и в тот же вечер оно обернулось тупиком: у
+  // Ramazan_LS токен был отозван, а прислать новый он физически не мог, станок молча брал
+  // старый на каждой попытке. Сеть моргнула — не повод переспрашивать (reason 'network').
   let sellerToken: string;
   if (primaryAny) {
-    sellerToken = decrypt(primaryAny.seller_token_enc);
-    await track('secondary_node');
+    const stored = decrypt(primaryAny.seller_token_enc);
+    const verdict = await conversation.external(() => verifyBotToken(stored));
+    if (verdict.ok || verdict.reason === 'network') {
+      sellerToken = stored;
+      await track('secondary_node');
+    } else {
+      await track('token_invalid', 'сохранённый токен отозван — прошу новый');
+      sellerToken = await askWorkingToken(
+        conversation,
+        ctx,
+        track,
+        from.id,
+        '🔑 Telegram больше не принимает токен твоего бота — его перевыпустили.\n\n' +
+          'Возьми актуальный: @BotFather → /mybots → твой бот → «API Token» — и пришли сюда:',
+      );
+      // Сохраняем сразу: даже если человек бросит настройку на следующем шаге, новый рабочий
+      // токен уже в базе, и следующая попытка не упрётся снова в мёртвый.
+      await conversation.external(() => setSellerTokenForUser(from.id, encrypt(sellerToken)));
+    }
   } else {
-    sellerToken = await askStep(conversation, ctx, {
-      video: config.videos.token,
-      prompt:
-        '3️⃣ Пришли токен твоего бота-продавца.\n' +
+    sellerToken = await askWorkingToken(
+      conversation,
+      ctx,
+      track,
+      from.id,
+      '3️⃣ Пришли токен твоего бота-продавца.\n' +
         'Создай бота: @BotFather → /newbot → скопируй строку вида 123456:AA...',
-      validate: (s) =>
-        isValidBotToken(s) ? null : '❌ Это не похоже на токен бота. Пример: 123456789:AAH... Пришли ещё раз:',
-    });
-    await track('token_ok');
+    );
   }
 
   // 🔴 29.08: баг живьём (узел #12) — юзер переприслал IP своего ЖЕ primary-сервера

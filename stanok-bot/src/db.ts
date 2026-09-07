@@ -221,6 +221,24 @@ export function setNodeStatus(id: number, status: string): void {
   db.prepare("UPDATE nodes SET status = ?, updated_at = datetime('now') WHERE id = ?").run(status, id);
 }
 
+// Токен бота-продавца у владельца ОДИН на всех его узлов (бот один, узлы — его точки),
+// поэтому и меняем сразу во всех его записях: иначе после смены токена вторая запись
+// осталась бы с мёртвым и всплыла бы при следующей замене сервера.
+// 🔴 07.09: заведено после инцидента с отозванным токеном (см. bot-token.ts).
+export function setSellerTokenForUser(tgUserId: number, sellerTokenEnc: string): void {
+  db.prepare("UPDATE nodes SET seller_token_enc = ?, updated_at = datetime('now') WHERE tg_user_id = ?").run(
+    sellerTokenEnc,
+    tgUserId,
+  );
+}
+
+/** Живые узлы, на которых реально крутится бот-продавец — их токены и проверяет монитор. */
+export function getReadyPrimaryNodes(): NodeRow[] {
+  return db
+    .prepare("SELECT * FROM nodes WHERE status = 'ready' AND is_primary = 1 ORDER BY id")
+    .all() as NodeRow[];
+}
+
 export function setNodeSupportKey(id: number, supportKeyEnc: string): void {
   db.prepare("UPDATE nodes SET support_key_enc = ?, updated_at = datetime('now') WHERE id = ?").run(supportKeyEnc, id);
 }

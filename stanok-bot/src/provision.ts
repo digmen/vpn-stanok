@@ -10,6 +10,7 @@ import { deploySeller, getBotUsername } from './deploy-seller.js';
 import { attachLocationToPrimary } from './attach-location.js';
 import { registerNodeDns } from './dns.js';
 import { restoreBackup } from './backup.js';
+import { TOKEN_INVALID_HELP, verifyBotToken } from './bot-token.js';
 import { testFromRussia } from './ru-probe.js';
 import { enableRelay } from './relay.js';
 import { notifyAdmins } from './admin.js';
@@ -141,6 +142,28 @@ export async function provisionNode(
     }
 
     if (node.is_primary) {
+      // 🔴 07.09: разворачивать бота на мёртвый токен нельзя — он не сможет залогиниться в
+      // Telegram, упадёт на старте, и pm2 будет поднимать его бесконечно (у Ramazan_LS так
+      // набежало 2333 перезапуска и 100% CPU на его же сервере, при этом молча). Проверяем
+      // ДО установки. Сеть моргнула ('network') — не блокируем, это не приговор токену.
+      const tokenCheck = await verifyBotToken(sellerToken);
+      if (!tokenCheck.ok && tokenCheck.reason === 'invalid') {
+        setNodeStatus(nodeId, 'error');
+        logEvent(who, 'token_invalid', `${node.server_ip} · перед установкой бота`);
+        await show(
+          `✅ VPN на ${node.server_ip} установлен и работает.\n\n` +
+            TOKEN_INVALID_HELP +
+            '\n\nКак получишь новый токен — нажми /start → «Я купил сервер» → «Настроить», ' +
+            'я спрошу только его, остальное уже настроено.',
+        );
+        await notifyAdmins(
+          api,
+          `🔑 Узел #${nodeId} (@${node.tg_username ?? '—'}): VPN поставлен, но токен бота отозван — ` +
+            'бота не разворачивал, жду новый токен от владельца.',
+        );
+        return;
+      }
+
       await show('✅ VPN установлен. ⚙️ Запускаю твоего бота-продавца… ещё пара минут.');
 
       await deploySeller({
