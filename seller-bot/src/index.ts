@@ -105,7 +105,13 @@ function clientKeyboard(owner: boolean, userId?: number): Keyboard {
     for (const p of s.packages.slice(i, i + 3)) kb.text(buyButtonText(p));
     kb.row();
   }
-  if (s.trial.enabled && userId !== undefined && !hasUsedTrial(userId) && !owner) {
+  // 🔴 08.09, живая жалоба (узел #19): «друг не может взять пробный, кнопки просто нет».
+  // Раньше кнопка ПРОПАДАЛА у того, кто пробный уже брал — и снаружи это неотличимо от
+  // «бот сломан»: человек удаляет чат, жмёт /start заново, кнопки всё нет, и объяснения
+  // тоже нет. Теперь кнопка на месте, а `giveTrial` честно отвечает «пробный у тебя уже
+  // был» — вопрос закрывается сам, без обращения к владельцу.
+  // У владельца её по-прежнему нет намеренно: у него есть своя «🆓 Мой VPN».
+  if (s.trial.enabled && userId !== undefined && !owner) {
     kb.text(`🎁 Попробовать бесплатно (${s.trial.days} дн.)`).row();
   }
   kb.text('📱 Установить приложение').text('❓ Помощь').row();
