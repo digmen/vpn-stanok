@@ -69,7 +69,13 @@ function readRemotes(): RemoteLocation[] {
         user: String(r.user ?? 'root'),
         keyFile: r.keyFile,
         addedAt: Number(r.addedAt) || Date.now(),
-        ...(r.protocol === 'vless_reality' ? { protocol: 'vless_reality' as const } : {}),
+        // 🔴 08.09: раньше здесь стояло `=== 'vless_reality'`, и протокол доп. локации,
+        // записанный любым ДРУГИМ значением, молча терялся при чтении — локация
+        // становилась «амнезийной» и обслуживалась не теми скриптами. Проверяем по
+        // списку известных значений, чтобы следующий протокол не выключил это снова.
+        ...(r.protocol === 'vless_reality' || r.protocol === 'vless_ws_tls'
+          ? { protocol: r.protocol as VpnProtocol }
+          : {}),
       }));
   } catch {
     return [];

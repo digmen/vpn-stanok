@@ -16,7 +16,11 @@ if (!host || !keyFilePath) {
 const port = portArg ? Number(portArg) : undefined;
 const privateKey = readFileSync(keyFilePath, 'utf8');
 // Отсутствует у старых вызовов станка (до 05.09) — amneziawg, там ничего другого не ставили.
-const protocol: VpnProtocol = protocolArg === 'vless_reality' ? 'vless_reality' : 'amneziawg';
+// 🔴 08.09: было сравнение с одним значением, из-за чего локация нового протокола
+// записывалась как amneziawg. Отсутствие аргумента (вызовы станка до 05.09) —
+// единственный случай, когда amneziawg честное умолчание.
+const protocol: VpnProtocol =
+  protocolArg === 'vless_reality' || protocolArg === 'vless_ws_tls' ? protocolArg : 'amneziawg';
 
 const id = nextLocationId();
 const keyFile = `loc-${id}.key`;

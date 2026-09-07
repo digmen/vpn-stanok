@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { NodeSSH } from 'node-ssh';
 import { REMOTE, SSH } from './constants.js';
 import { extractClientConfig } from './parse.js';
-import { testHandshake, testVlessRealityHandshake } from './handshake-test.js';
+import { testHandshake, testVlessRealityHandshake, testVlessWsTlsHandshake } from './handshake-test.js';
 import type { NodeProtocol } from './db.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -140,8 +140,13 @@ export async function checkNodeAlive(
       return { ok: false, detail: 'скрипт выдачи не вернул конфиг' };
     }
 
-    const hs = protocol === 'vless_reality' ? await testVlessRealityHandshake(config) : await testHandshake(config, 8000);
-    return hs;
+    // 🔴 08.09: тут было `=== 'vless_reality' ? ... : testHandshake`, то есть узлы нового
+    // протокола проверялись бы AmneziaWG-тестом и монитор слал бы по ним ложное
+    // «недоступен» каждые 30 минут. Ровно этот баг уже был 06.09 после прошлой миграции —
+    // повторился бы один в один, поэтому теперь разбор по всем вариантам.
+    if (protocol === 'vless_reality') return await testVlessRealityHandshake(config);
+    if (protocol === 'vless_ws_tls') return await testVlessWsTlsHandshake(config);
+    return await testHandshake(config, 8000);
   } catch (e) {
     return { ok: false, detail: e instanceof Error ? e.message : String(e) };
   } finally {

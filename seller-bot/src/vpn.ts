@@ -74,11 +74,20 @@ export async function createVpnPeerAt(loc: Location): Promise<Peer> {
     // ВЫШЕ обычного host-фикса — если для этой локации включён релей, клиент
     // должен получить адрес релея (Прага + свой порт), а не адрес самого узла,
     // даже если тот тоже указан. uuid/pbk/sid клиента не трогаем — они настоящие.
-    const relay = loc.protocol === 'vless_reality' ? getClientEndpoint(loc.id) : undefined;
+    // 🔴 08.09, живой баг: обе проверки ниже были написаны как `=== 'vless_reality'`, и
+    // появление третьего протокола (vless_ws_tls) их молча выключило — клиент получал
+    // адрес САМОГО узла вместо релея и не мог подключиться вообще (узел из РФ напрямую
+    // недоступен, ради чего релей и заведён). Компилятор такое не ловит: это сравнение
+    // значений, а не разбор всех вариантов типа.
+    // Правильный признак здесь — «ссылка вида vless://», а не конкретный протокол:
+    // подмена host:port одинаково верна для любого из них, а отличается лишь AmneziaWG
+    // со своим форматом конфига.
+    const isVless = loc.protocol !== 'amneziawg';
+    const relay = isVless ? getClientEndpoint(loc.id) : undefined;
     const finalConfig = relay
       ? withVlessHostPort(config, relay.host, relay.port)
       : host
-        ? (loc.protocol === 'vless_reality' ? withVlessHost(config, host) : withEndpointHost(config, host))
+        ? (isVless ? withVlessHost(config, host) : withEndpointHost(config, host))
         : config;
     return { config: finalConfig, pubkey, loc: loc.id, locTitle: loc.title, protocol: loc.protocol };
   } catch (e: unknown) {
