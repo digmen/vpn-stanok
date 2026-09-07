@@ -20,11 +20,20 @@ export interface Package {
 export interface Settings {
   packages: Package[];
   trial: { enabled: boolean; days: number };
+  /** Реферальная программа: привёл друга — получил долю его срока временем (см.
+   *  referrals.ts). Процент задаёт владелец — это его бизнес-решение, не наше. */
+  referral: { enabled: boolean; percent: number };
   /** Напоминание клиенту за N дней до конца подписки (см. reminders.ts). Включено по
    *  умолчанию: до 08.09 бот молча отзывал ключ в момент истечения, и человек узнавал
    *  об окончании тем, что интернет перестал работать. */
   reminder: { enabled: boolean; days: number };
   welcome: { text: string | null; photo: string | null };
+}
+
+/** Доля от срока друга, которую получает пригласивший. Верхняя граница не 100:
+ *  отдавать больше половины — уже не программа лояльности, а раздача. */
+export function isValidPercent(n: number): boolean {
+  return Number.isInteger(n) && n >= 1 && n <= 50;
 }
 
 /** За сколько дней предупреждать — владелец выбирает из этого списка.
@@ -73,6 +82,7 @@ function fresh(): Settings {
   return {
     packages: defaultPackages(legacyPrice(), config.days),
     trial: { enabled: false, days: 3 },
+    referral: { enabled: false, percent: 30 },
     reminder: { enabled: true, days: 2 },
     welcome: { text: null, photo: null },
   };
@@ -96,6 +106,12 @@ export function normalize(raw: unknown): Settings {
     trial: {
       enabled: Boolean(r.trial?.enabled),
       days: isValidDays(Number(r.trial?.days)) ? Number(r.trial!.days) : base.trial.days,
+    },
+    // Реферальная программа по умолчанию ВЫКЛЮЧЕНА, в отличие от напоминаний: она
+    // раздаёт время за счёт владельца, и включать её за него мы не вправе.
+    referral: {
+      enabled: Boolean(r.referral?.enabled),
+      percent: isValidPercent(Number(r.referral?.percent)) ? Number(r.referral!.percent) : base.referral.percent,
     },
     // Поля нет у всех настроек, записанных до 08.09 — тогда берём умолчание «включено».
     // Именно поэтому проверяем на undefined, а не Boolean(...): иначе у всех старых

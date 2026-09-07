@@ -146,6 +146,41 @@ export function removePeer(pubkey: string): void {
   if (touched) write(next);
 }
 
+/**
+ * Продлевает ДЕЙСТВУЮЩУЮ подписку человека на N дней. Нужно реферальной программе:
+ * бонус ложится временем, ничего не выдавая заново — новые пиры тут не нужны, у
+ * человека уже есть рабочие ключи.
+ *
+ * Если активных подписок несколько, берём самую «живучую»: продлевать ту, что вот-вот
+ * истечёт, значит подарить время, которое сгорит первым.
+ * false = продлевать нечего, вызывающий тогда кладёт дни в копилку до его покупки.
+ */
+export function extendForUser(userId: number, days: number, now = Date.now()): boolean {
+  if (days <= 0) return false;
+  return shiftForUser(userId, days, now);
+}
+
+/**
+ * Двигает срок действующей подписки на любое число дней, в том числе НАЗАД — это нужно
+ * для возврата звёзд: начисленный за отменённую покупку бонус обязан сниматься, иначе
+ * «купил → вернул деньги → время осталось» даёт бесконечную подписку. Уход срока в
+ * прошлое — корректный исход, такую подписку подберёт обычная почасовая уборка истёкших.
+ */
+export function shiftForUser(userId: number, days: number, now = Date.now()): boolean {
+  if (days === 0) return false;
+  const subs = read();
+  let idx = -1;
+  for (let i = 0; i < subs.length; i++) {
+    const s = subs[i];
+    if (s.userId !== userId || s.expiresAt <= now) continue;
+    if (idx === -1 || s.expiresAt > subs[idx].expiresAt) idx = i;
+  }
+  if (idx === -1) return false;
+  subs[idx] = { ...subs[idx], expiresAt: subs[idx].expiresAt + days * DAY_MS };
+  write(subs);
+  return true;
+}
+
 export function activeCount(now = Date.now()): number {
   return read().filter((s) => s.expiresAt > now).length;
 }

@@ -2,8 +2,17 @@ import { Bot, InlineKeyboard, Keyboard } from 'grammy';
 import { config } from './config.js';
 import { promoEnabled } from './branding.js';
 import { markReminded, pendingReminders } from './reminders.js';
+import {
+  bankDays,
+  bindReferral,
+  inviteLink,
+  parseCode,
+  registerPurchase,
+  statsFor,
+  takeBanked,
+} from './referrals.js';
 import { createVpnPeer, createVpnPeerAt, createVpnPeersEverywhere, revokePeerAt, type Peer } from './vpn.js';
-import { activeClients, addSubscription, getExpiredPeers, removePeer, revenueStars } from './subscriptions.js';
+import { activeClients, addSubscription, extendForUser, getExpiredPeers, removePeer, revenueStars } from './subscriptions.js';
 import { APPS, offerConfig, offerConfigs, registerDeliveryHandlers } from './delivery.js';
 import {
   addRemote,
@@ -30,6 +39,7 @@ import {
   findPackage,
   getSettings,
   isValidDays,
+  isValidPercent,
   isValidStars,
   LIMITS,
   nextPackageId,
@@ -55,7 +65,7 @@ function appLinksText(): string {
 // перезапуск специально: зависшее ожидание не должно жевать чужие сообщения.
 type PendingKind =
   | 'pkg-price' | 'pkg-days' | 'pkg-new-days' | 'pkg-new-stars'
-  | 'welcome-text' | 'welcome-photo' | 'trial-days'
+  | 'welcome-text' | 'welcome-photo' | 'trial-days' | 'ref-percent'
   // Добавление локации: сначала адрес, потом пароль, потом название
   | 'loc-host' | 'loc-password' | 'loc-title' | 'loc-rename' | 'loc-editip';
 let pending: { kind: PendingKind; arg?: string; at: number } | null = null;
@@ -116,6 +126,7 @@ function clientKeyboard(owner: boolean, userId?: number): Keyboard {
   if (s.trial.enabled && userId !== undefined && !owner) {
     kb.text(`🎁 Попробовать бесплатно (${s.trial.days} дн.)`).row();
   }
+  if (getSettings().referral.enabled) kb.text('🤝 Пригласить друга').row();
   kb.text('📱 Установить приложение').text('❓ Помощь').row();
   // Промо-кнопка франшизы — reply-панель не умеет URL-кнопки, поэтому это
   // текст-кнопка, по которой бот присылает ссылку на станок (см. hears ниже).
@@ -147,6 +158,16 @@ async function showMenu(ctx: any): Promise<void> {
 bot.command('start', async (ctx) => {
   pending = null;
   claimOwnerIfUnset(ctx.from!.id);
+  // Реферальная ссылка вида /start r<id>. Привязка молчаливая, если она уже была —
+  // человек не должен видеть «ты приглашён» на каждый /start.
+  const inviter = parseCode(ctx.match as string | undefined);
+  const me = ctx.from!.id;
+  if (inviter !== null && bindReferral(me, inviter, { isOwner: isOwner(me) })) {
+    await ctx.reply(
+      '👋 Ты пришёл по приглашению. Ничего делать не нужно — просто выбери тариф. ' +
+        'Тому, кто тебя позвал, за твою первую покупку добавится время.',
+    );
+  }
   await showMenu(ctx);
 });
 
@@ -213,7 +234,11 @@ bot.on('pre_checkout_query', async (ctx) => {
 bot.on('message:successful_payment', async (ctx) => {
   const pay = ctx.message.successful_payment;
   const pkg = findPackage(pay.invoice_payload.replace(/^pkg:/, ''));
-  const days = pkg?.days ?? config.days;
+  // Копилка реферальных дней применяется ИМЕННО ЗДЕСЬ, при первой же покупке:
+  // выдавать пиры тому, кто сам ничего не покупал, значит раздавать бесплатный VPN
+  // за приглашения. Пока покупки нет — дни просто лежат (см. referrals.ts::bankDays).
+  const bonusDays = takeBanked(ctx.from.id);
+  const days = (pkg?.days ?? config.days) + bonusDays;
   recordEvent({ type: 'paid', stars: pay.total_amount, userId: ctx.from.id });
   // Платный тариф даёт доступ ко ВСЕМ локациям — ровно то, о чём просил
   // франчайзи: «покупает на месяц, а ему доступен Лондон, Финляндия».
@@ -225,7 +250,41 @@ bot.on('message:successful_payment', async (ctx) => {
     { userId: ctx.from.id, username: ctx.from.username, stars: pay.total_amount },
   );
   await offerConfigs(ctx.api, ctx.chat.id, peers.map((p) => ({ config: p.config, title: p.locTitle, protocol: p.protocol })));
+  if (bonusDays > 0) {
+    await ctx.reply(`🤝 К сроку добавлено ${bonusDays} дн. за приглашённых друзей.`).catch(() => {});
+  }
+  void awardReferral(ctx.api, ctx.from.id, pkg?.days ?? config.days, pay.telegram_payment_charge_id);
 });
+
+/**
+ * Начисление пригласившему. Намеренно НЕ ждём результата в обработчике оплаты
+ * (`void`) и глушим любую ошибку: упавшая благодарность не должна ломать выдачу
+ * уже оплаченного ключа — покупка важнее бонуса.
+ *
+ * Считаем от КУПЛЕННОГО срока, без бонусных дней: иначе подаренное время само
+ * порождало бы новое начисление.
+ */
+async function awardReferral(api: typeof bot.api, buyer: number, boughtDays: number, charge: string): Promise<void> {
+  try {
+    const award = registerPurchase(buyer, boughtDays, charge);
+    if (!award) return;
+    // Продлеваем действующую подписку, а если её нет — кладём в копилку до его
+    // собственной первой покупки (пиры за приглашения не выдаём, см. выше).
+    const applied = extendForUser(award.inviter, award.days);
+    if (!applied) bankDays(award.inviter, award.days);
+    await api
+      .sendMessage(
+        award.inviter,
+        applied
+          ? `🤝 Друг по твоей ссылке оформил подписку — тебе добавлено ${award.days} дн.`
+          : `🤝 Друг по твоей ссылке оформил подписку. Тебе начислено ${award.days} дн. — ` +
+              'они добавятся к сроку, как только оформишь подписку.',
+      )
+      .catch(() => {});
+  } catch {
+    /* реферальная программа — надстройка, покупку она ронять не должна */
+  }
+}
 
 // ── пробный период ────────────────────────────────────────────────────────
 async function giveTrial(ctx: any): Promise<void> {
@@ -264,6 +323,7 @@ function adminMenu(): InlineKeyboard {
     .text('🎁 Пробный период', 'trialcfg')
     .row()
     .text('🔔 Напоминания', 'remcfg')
+    .text('🤝 Рефералы', 'refcfg')
     .row()
     .text('✍️ Приветствие', 'wtext')
     .text('🖼 Фото', 'wphoto')
@@ -391,6 +451,43 @@ bot.callbackQuery('trialcfg', async (ctx) => {
 // Напоминания об окончании подписки — настройка владельца.
 // Дни переключаются по кругу (1→2→3), а не вводом с клавиатуры: вариантов всего три,
 // и лишний шаг «пришли число» тут только мешает.
+// Реферальная программа — настройка владельца. Выключена по умолчанию: она раздаёт
+// время за его счёт, включать за него нельзя.
+bot.callbackQuery('refcfg', async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!isOwner(ctx.from?.id)) return;
+  const r = getSettings().referral;
+  const kb = new InlineKeyboard()
+    .text(r.enabled ? '🔴 Выключить' : '🟢 Включить', 'reftoggle')
+    .text(`% Доля (${r.percent}%)`, 'refpercent')
+    .row()
+    .text('← Назад', 'admin');
+  await ctx
+    .editMessageText(
+      '🤝 Реферальная программа\n\n' +
+        `Сейчас: ${r.enabled ? `включена, ${r.percent}% срока` : 'выключена'}\n\n` +
+        'Клиент приводит друга по своей ссылке и получает долю от срока, который друг купил — ' +
+        'временем, а не деньгами. Считается только первая покупка друга.',
+      { reply_markup: kb },
+    )
+    .catch(() => {});
+});
+
+bot.callbackQuery('reftoggle', async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!isOwner(ctx.from?.id)) return;
+  const s = updateSettings((cur) => ({ ...cur, referral: { ...cur.referral, enabled: !cur.referral.enabled } }));
+  await showAdmin(ctx, s.referral.enabled ? '🟢 Реферальная программа включена.' : '🔴 Реферальная программа выключена.');
+});
+
+bot.callbackQuery('refpercent', async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!isOwner(ctx.from?.id)) return;
+  await ctx.reply('Какую долю от срока друга начислять? Пришли число от 1 до 50 (процентов):', {
+    reply_markup: ask('ref-percent'),
+  });
+});
+
 bot.callbackQuery('remcfg', async (ctx) => {
   await ctx.answerCallbackQuery();
   if (!isOwner(ctx.from?.id)) return;
@@ -676,6 +773,31 @@ bot.command('stats', async (ctx) => {
 // поэтому нажатие панели не «съедается» ожиданием ввода. Клиентские кнопки
 // НЕ трогают pending (это глобальное состояние ввода ВЛАДЕЛЬЦА — обнулять его
 // нажатием клиента нельзя); pending чистит только вход в кабинет владельца.
+bot.hears('🤝 Пригласить друга', async (ctx) => {
+  const s = getSettings();
+  if (!s.referral.enabled) return;
+  const me = ctx.from!.id;
+  const st = statsFor(me);
+  const lines = [
+    `🤝 Приведи друга — получи ${s.referral.percent}% его срока временем.`,
+    '',
+    'Твоя ссылка (перешли её другу):',
+    inviteLink(bot.botInfo.username, me),
+    '',
+    'Как это работает:',
+    '• друг переходит по ссылке и оформляет подписку;',
+    `• тебе добавляется ${s.referral.percent}% от срока, который он купил;`,
+    '• считается от первой покупки друга, время приходит само.',
+  ];
+  if (st.invited > 0 || st.daysEarned > 0) {
+    lines.push('', `Пришло по ссылке: ${st.invited} · купили: ${st.bought} · начислено: ${st.daysEarned} дн.`);
+  }
+  // Копилка: дни есть, но применить их пока некуда — честно про это говорим,
+  // иначе человек считает, что бонус потерялся.
+  if (st.banked > 0) lines.push('', `⏳ Ждут твоей первой подписки: ${st.banked} дн.`);
+  await ctx.reply(lines.join('\n'), { link_preview_options: { is_disabled: true } });
+});
+
 bot.hears('📱 Установить приложение', (ctx) => sendApps(ctx));
 bot.hears('❓ Помощь', (ctx) => sendHelp(ctx));
 
@@ -882,6 +1004,17 @@ bot.on('message:text', async (ctx) => {
       pending = null;
       await ctx.reply(`✅ Тариф добавлен: ${days} дн. — ${n} ⭐`);
     }
+    return;
+  }
+
+  if (kind === 'ref-percent') {
+    if (!isValidPercent(n)) {
+      await ctx.reply('❌ Нужно целое число от 1 до 50. Больше половины срока — это уже не программа лояльности.');
+      return;
+    }
+    updateSettings((cur) => ({ ...cur, referral: { ...cur.referral, percent: n } }));
+    pending = null;
+    await ctx.reply(`✅ Доля друга: ${n}% от купленного срока.`);
     return;
   }
 
