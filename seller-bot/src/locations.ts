@@ -2,7 +2,7 @@ import { chmodSync, existsSync, readFileSync, unlinkSync, writeFileSync } from '
 import path from 'node:path';
 import { config } from './config.js';
 
-export type VpnProtocol = 'amneziawg' | 'vless_reality';
+export type VpnProtocol = 'amneziawg' | 'vless_reality' | 'vless_ws_tls';
 
 // Локации = VPN-серверы, с которых бот выдаёт ключи.
 //

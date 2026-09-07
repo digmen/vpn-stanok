@@ -83,8 +83,13 @@ function welcomeText(): string {
   );
 }
 
+// 🔴 08.09: тарифы переехали из колонки в один ряд (его просьба). Надпись пришлось
+// ужать: «🛒 30 дней — 50 ⭐» в три кнопки поперёк экрана телефона не влезает и
+// обрезается многоточием. Цена внутри кнопки остаётся — это и просили.
+// Текст кнопки здесь же и опознаётся при нажатии (см. bot.hears(/^🛒 /) ниже), поэтому
+// формируется одной функцией: разъедутся — покупка перестанет находить тариф.
 function buyButtonText(p: Parameters<typeof packageLabel>[0]): string {
-  return `🛒 ${packageLabel(p)}`;
+  return `🛒 ${p.days} дн · ${p.stars}⭐`;
 }
 
 // Панель клиента: по кнопке на тариф, «попробовать», приложение, помощь;
@@ -93,7 +98,13 @@ function buyButtonText(p: Parameters<typeof packageLabel>[0]): string {
 function clientKeyboard(owner: boolean, userId?: number): Keyboard {
   const s = getSettings();
   const kb = new Keyboard();
-  for (const p of s.packages) kb.text(buyButtonText(p)).row();
+  // Тарифы в ряд, по три в строке: 30/60/90 встают рядом одной полосой, а не
+  // растягивают панель на три этажа. Больше трёх тарифов владелец завести может —
+  // тогда просто переносим на следующую строку, а не сваливаем всё в одну.
+  for (let i = 0; i < s.packages.length; i += 3) {
+    for (const p of s.packages.slice(i, i + 3)) kb.text(buyButtonText(p));
+    kb.row();
+  }
   if (s.trial.enabled && userId !== undefined && !hasUsedTrial(userId) && !owner) {
     kb.text(`🎁 Попробовать бесплатно (${s.trial.days} дн.)`).row();
   }

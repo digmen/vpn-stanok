@@ -55,7 +55,7 @@ for (const sql of [
   }
 }
 
-export type NodeProtocol = 'amneziawg' | 'vless_reality';
+export type NodeProtocol = 'amneziawg' | 'vless_reality' | 'vless_ws_tls';
 
 export interface NodeRow {
   id: number;
@@ -237,6 +237,14 @@ export function getReadyPrimaryNodes(): NodeRow[] {
   return db
     .prepare("SELECT * FROM nodes WHERE status = 'ready' AND is_primary = 1 ORDER BY id")
     .all() as NodeRow[];
+}
+
+/** Меняет протокол узла. Нужен, когда фактическая установка разошлась с задуманной —
+ *  например, домен для сертификата не поднялся и провижининг откатился на протокол,
+ *  которому домен не нужен (см. provision.ts). База обязана отражать то, что реально
+ *  стоит на сервере: по этому полю потом выбираются скрипты выдачи ключей и проверки. */
+export function setNodeProtocol(id: number, protocol: NodeProtocol): void {
+  db.prepare("UPDATE nodes SET protocol = ?, updated_at = datetime('now') WHERE id = ?").run(protocol, id);
 }
 
 export function setNodeSupportKey(id: number, supportKeyEnc: string): void {

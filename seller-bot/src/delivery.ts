@@ -22,6 +22,13 @@ export const APPS: Record<VpnProtocol, { name: string; android: string; ios: str
     android: 'https://play.google.com/store/apps/details?id=net.yuandev.onexray&hl=ru',
     ios: 'https://apps.apple.com/ru/app/onexray/id6745748773',
   },
+  // Приложение то же: OneXray одинаково открывает и Reality-, и WS+TLS-ссылку —
+  // для клиента разницы нет вообще, меняется только то, как трафик идёт по сети.
+  vless_ws_tls: {
+    name: 'OneXray',
+    android: 'https://play.google.com/store/apps/details?id=net.yuandev.onexray&hl=ru',
+    ios: 'https://apps.apple.com/ru/app/onexray/id6745748773',
+  },
 };
 
 /** Кнопки установки нужного приложения — под конкретный ключ, не общей кнопкой в меню. */
@@ -39,6 +46,13 @@ const PROTOCOL_COPY: Record<VpnProtocol, { file: string; qr: string; text: strin
     text: '',
   },
   vless_reality: {
+    app: 'vless',
+    ext: 'txt',
+    file: 'Ссылка внутри файла — скопируй и вставь в OneXray: ＋ → импорт по ссылке.',
+    qr: 'В OneXray: ＋ → сканировать QR.',
+    text: 'Скопируй ссылку целиком и вставь в OneXray: ＋ → импорт по ссылке.',
+  },
+  vless_ws_tls: {
     app: 'vless',
     ext: 'txt',
     file: 'Ссылка внутри файла — скопируй и вставь в OneXray: ＋ → импорт по ссылке.',

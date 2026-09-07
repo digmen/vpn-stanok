@@ -3,12 +3,12 @@ import { fileURLToPath } from 'node:url';
 import { InlineKeyboard, type Api } from 'grammy';
 import { config } from './config.js';
 import { decrypt, encrypt } from './crypto.js';
-import { getNodeById, getPrimaryReadyNode, setNodeRelay, setNodeStatus, setNodeSupportKey, type NodeProtocol } from './db.js';
+import { getNodeById, getPrimaryReadyNode, setNodeProtocol, setNodeRelay, setNodeStatus, setNodeSupportKey, type NodeProtocol } from './db.js';
 import { runRemoteInstall } from './ssh.js';
-import { testHandshake, testVlessRealityHandshake } from './handshake-test.js';
+import { testHandshake, testVlessRealityHandshake, testVlessWsTlsHandshake } from './handshake-test.js';
 import { deploySeller, getBotUsername } from './deploy-seller.js';
 import { attachLocationToPrimary } from './attach-location.js';
-import { registerNodeDns } from './dns.js';
+import { nodeDomain, registerNodeDns } from './dns.js';
 import { restoreBackup } from './backup.js';
 import { TOKEN_INVALID_HELP, verifyBotToken } from './bot-token.js';
 import { testFromRussia } from './ru-probe.js';
@@ -25,10 +25,15 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const INSTALL: Record<NodeProtocol, { script: string; label: string }> = {
   amneziawg: { script: path.resolve(__dirname, '../scripts/install-amneziawg.sh'), label: 'AmneziaWG' },
   vless_reality: { script: path.resolve(__dirname, '../scripts/install-vless-reality.sh'), label: 'VLESS+Reality' },
+  // 🔴 08.09: протокол по умолчанию для новых узлов. В отличие от двух других, требует
+  // домен — на него выписывается сертификат, поэтому A-запись заводится ДО установки.
+  vless_ws_tls: { script: path.resolve(__dirname, '../scripts/install-vless-ws-tls.sh'), label: 'VLESS+WS+TLS' },
 };
 
 async function runHandshakeTest(protocol: NodeProtocol, clientConfig: string) {
-  return protocol === 'vless_reality' ? testVlessRealityHandshake(clientConfig) : testHandshake(clientConfig);
+  if (protocol === 'vless_reality') return testVlessRealityHandshake(clientConfig);
+  if (protocol === 'vless_ws_tls') return testVlessWsTlsHandshake(clientConfig);
+  return testHandshake(clientConfig);
 }
 
 // Провижининг узла: ставим VPN (AmneziaWG или VLESS+Reality — см. node.protocol)
@@ -76,7 +81,29 @@ export async function provisionNode(
     return;
   }
 
-  const install = INSTALL[node.protocol];
+  // 🔴 08.09: VLESS+WS+TLS требует домен (на него выписывается сертификат Let's Encrypt),
+  // поэтому A-запись заводится ЗАРАНЕЕ — certbot проверяет владение доменом прямо во время
+  // установки, и запись «после успеха», как было раньше, для этого бесполезна.
+  // Если зона не настроена или PowerDNS не ответил — не падаем, а честно откатываемся на
+  // Reality: домен ему не нужен, узел всё равно поднимется, просто менее стойким способом.
+  let protocol = node.protocol;
+  let domain: string | null = null;
+  if (protocol === 'vless_ws_tls') {
+    domain = nodeDomain(nodeId);
+    const dnsOk = domain ? await registerNodeDns(nodeId, node.server_ip) : false;
+    if (!dnsOk) {
+      protocol = 'vless_reality';
+      domain = null;
+      setNodeProtocol(nodeId, protocol);
+      logEvent(who, 'provision_fail', `${node.server_ip} · нет DNS для сертификата, откат на Reality`);
+      await notifyAdmins(
+        api,
+        `⚠️ Узел #${nodeId}: не удалось завести DNS-запись для сертификата — ставлю Reality вместо WS+TLS.`,
+      );
+    }
+  }
+
+  const install = INSTALL[protocol];
 
   setNodeStatus(nodeId, 'provisioning');
   await show(`🔌 Ставлю ${install.label} на ${node.server_ip}… (пара минут)`);
@@ -86,7 +113,8 @@ export async function provisionNode(
       host: node.server_ip,
       password,
       scriptLocalPath: install.script,
-      args: [node.server_ip],
+      // WS+TLS вторым аргументом принимает домен — под него и выпускается сертификат.
+      args: domain ? [node.server_ip, domain] : [node.server_ip],
     });
 
     // 🔴 25.08: раньше отсюда сразу шли к setNodeStatus(nodeId, 'ready') на одном
@@ -95,12 +123,12 @@ export async function provisionNode(
     // только когда клиент жаловался. Теперь — настоящий handshake со станка
     // ДО того, как сказать владельцу "готово". См. handshake-test.ts.
     await show(`✅ VPN установлен на ${node.server_ip}. 🤝 Проверяю, что он реально принимает подключения…`);
-    const hs = await runHandshakeTest(node.protocol, firstClientConfig);
+    const hs = await runHandshakeTest(protocol, firstClientConfig);
     if (!hs.ok) {
       setNodeStatus(nodeId, 'error');
       logEvent(who, 'provision_fail', `${node.server_ip} · handshake-test: ${hs.detail}`.slice(0, 200));
       const commonCause =
-        node.protocol === 'vless_reality'
+        protocol !== 'amneziawg'
           ? 'Частая причина — хостер блокирует исходящий/входящий TCP:443 снаружи (отдельно от ' +
             'файрвола на самом сервере) — стоит проверить в панели хостинга.'
           : 'Частая причина — хостер по умолчанию блокирует нестандартные UDP-порты снаружи ' +
@@ -130,7 +158,7 @@ export async function provisionNode(
     // доп. локации владельца пока не покрыты, это отдельный заход.
     let ruWarning = '';
     let ruFailed: Awaited<ReturnType<typeof testFromRussia>> = null;
-    if (node.protocol === 'vless_reality') {
+    if (protocol !== 'amneziawg') {
       ruFailed = await testFromRussia(firstClientConfig);
       if (ruFailed && !ruFailed.ok) {
         await notifyAdmins(
@@ -173,7 +201,7 @@ export async function provisionNode(
         ownerId: node.tg_user_id,
         stanokUrl: config.stanokUrl,
         priceStars: config.sellerPriceStars,
-        protocol: node.protocol,
+        protocol,
       });
 
       setNodeStatus(nodeId, 'ready');
@@ -225,7 +253,7 @@ export async function provisionNode(
       const uname = await getBotUsername(sellerToken);
       const kb = uname ? new InlineKeyboard().url('🚀 Открыть моего бота', `https://t.me/${uname}`) : undefined;
       const appLine =
-        node.protocol === 'vless_reality'
+        protocol !== 'amneziawg'
           ? 'Клиентам он продаёт VPN за ⭐️. Для подключения — приложение OneXray (и Android, и iPhone).'
           : 'Клиентам он продаёт VPN за ⭐️. Для подключения — приложение AmneziaVPN.';
       await show(
@@ -256,7 +284,7 @@ export async function provisionNode(
         newPassword: password,
         primaryHost: primary.server_ip,
         primaryPassword: decrypt(primary.root_password_enc),
-        protocol: node.protocol,
+        protocol,
       });
       setNodeSupportKey(nodeId, encrypt(supportPrivateKey));
 

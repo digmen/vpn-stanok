@@ -228,3 +228,92 @@ export async function testVlessRealityHandshake(link: string, waitMs = 5000): Pr
     rmSync(dir, { recursive: true, force: true });
   }
 }
+
+// 🔴 08.09: проверка для VLESS+WS+TLS. Без неё узел нового протокола проверялся бы
+// AmneziaWG-тестом (ветка по умолчанию в provision.ts) и «успешно» проходил бы его
+// мимо реального протокола — то есть владелец получал бы «готово» на неработающем узле.
+// Отличия от Reality-варианта ровно два: транспорт (ws вместо tcp) и то, что TLS здесь
+// настоящий — проверяем именем домена, а не подменой чужого сертификата.
+export function parseVlessWsTlsLink(link: string): {
+  uuid: string;
+  host: string;
+  port: number;
+  sni: string;
+  wsHost: string;
+  path: string;
+} {
+  const m = link.match(VLESS_LINK_RE);
+  if (!m) throw new Error('не похоже на vless-ссылку: ' + link.slice(0, 100));
+  const params = new URLSearchParams(m[4]);
+  const sni = params.get('sni') ?? '';
+  const path = params.get('path') ?? '';
+  if (!sni || !path) throw new Error('в vless-ссылке нет sni/path — не WS+TLS-профиль');
+  return {
+    uuid: m[1],
+    host: m[2],
+    port: Number(m[3]),
+    sni,
+    wsHost: params.get('host') || sni,
+    path: decodeURIComponent(path),
+  };
+}
+
+export async function testVlessWsTlsHandshake(link: string, waitMs = 5000): Promise<HandshakeTestResult> {
+  if (!(await xrayAvailable())) {
+    return { ok: false, detail: 'на станке нет бинарника xray — проверка невозможна' };
+  }
+
+  let peer: ReturnType<typeof parseVlessWsTlsLink>;
+  try {
+    peer = parseVlessWsTlsLink(link);
+  } catch (e) {
+    return { ok: false, detail: e instanceof Error ? e.message : String(e) };
+  }
+
+  const socksPort = 20000 + Math.floor(Math.random() * 10000);
+  const dir = mkdtempSync(path.join(tmpdir(), 'stanok-ws-hstest-'));
+  const confPath = path.join(dir, 'client.json');
+  const clientConfig = {
+    log: { loglevel: 'warning' },
+    inbounds: [{ listen: '127.0.0.1', port: socksPort, protocol: 'socks', settings: { udp: false } }],
+    outbounds: [
+      {
+        protocol: 'vless',
+        settings: {
+          vnext: [{ address: peer.host, port: peer.port, users: [{ id: peer.uuid, encryption: 'none' }] }],
+        },
+        streamSettings: {
+          network: 'ws',
+          security: 'tls',
+          tlsSettings: { serverName: peer.sni },
+          wsSettings: { path: peer.path, host: peer.wsHost },
+        },
+      },
+    ],
+  };
+  writeFileSync(confPath, JSON.stringify(clientConfig), { mode: 0o600 });
+
+  const proc = spawn('xray', ['run', '-c', confPath], { stdio: 'ignore' });
+  try {
+    await new Promise((r) => setTimeout(r, waitMs));
+    const { stdout } = await execFileP('curl', [
+      '-fsS', '--max-time', '8', '-x', `socks5h://127.0.0.1:${socksPort}`, 'https://api.ipify.org',
+    ]);
+    const ip = stdout.trim();
+    if (/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) {
+      return { ok: true, detail: `запрос через WS+TLS прошёл, ответ от api.ipify.org: ${ip}` };
+    }
+    return { ok: false, detail: 'curl вернул что-то не похожее на IP: ' + ip.slice(0, 100) };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return {
+      ok: false,
+      detail:
+        'запрос через WS+TLS не прошёл — сервер поднялся, но трафик не идёт ' +
+        '(порт 443 закрыт хостером или сертификат не подошёл): ' + msg.slice(0, 200),
+    };
+  } finally {
+    proc.kill();
+    rmSync(dir, { recursive: true, force: true });
+  }
+}

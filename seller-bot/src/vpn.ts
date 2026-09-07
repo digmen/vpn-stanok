@@ -24,6 +24,10 @@ const SCRIPTS: Record<VpnProtocol, { add: string; revoke: string }> = {
     add: path.resolve(__dirname, '../scripts/add-vless-reality-peer.sh'),
     revoke: path.resolve(__dirname, '../scripts/revoke-vless-reality-peer.sh'),
   },
+  vless_ws_tls: {
+    add: path.resolve(__dirname, '../scripts/add-vless-ws-tls-peer.sh'),
+    revoke: path.resolve(__dirname, '../scripts/revoke-vless-ws-tls-peer.sh'),
+  },
 };
 
 export interface Peer {

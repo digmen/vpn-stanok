@@ -2,6 +2,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { NodeSSH } from 'node-ssh';
 import { REMOTE, SSH } from './constants.js';
+import type { NodeProtocol } from './db.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SELLER_LOCAL = path.resolve(__dirname, '../../seller-bot');
@@ -16,7 +17,7 @@ export interface DeployOpts {
   /** Какой протокол установлен на ЭТОМ (primary) сервере — seller-bot читает его
    *  из .env, чтобы знать, каким add/revoke-скриптом обслуживать локацию 'local'
    *  (см. seller-bot/src/config.ts::primaryProtocol, locations.ts::allLocations). */
-  protocol: 'amneziawg' | 'vless_reality';
+  protocol: NodeProtocol;
 }
 
 // Разворачивает бота-продавца на сервере узла: Node + pm2 + код + npm install + .env + запуск.

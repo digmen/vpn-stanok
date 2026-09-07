@@ -5,6 +5,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { NodeSSH } from 'node-ssh';
 import { REMOTE, SSH } from './constants.js';
+import type { NodeProtocol } from './db.js';
 
 const execFileP = promisify(execFile);
 
@@ -38,7 +39,7 @@ export interface AttachLocationOpts {
   /** Какой протокол уже установлен на newHost (см. provision.ts — установка идёт
    *  ДО вызова этой функции). Влияет только на то, что запишется в locations.json
    *  primary-бота — сама установка сюда не входит. */
-  protocol: 'amneziawg' | 'vless_reality';
+  protocol: NodeProtocol;
 }
 
 export interface AttachLocationResult {

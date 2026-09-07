@@ -9,10 +9,20 @@ import { config } from './config.js';
 // референса (посмотреть глазами, куда что показывает), сам VLESS+Reality как использовал
 // голый IP без домена (осознанное решение 05.09 — без домена и сертификата), так и продолжает.
 //
-// Намеренно best-effort: если PDNS_ZONE не задан или API недоступен — тихо пропускаем,
-// провижининг узла не должен падать из-за DNS-мелочи.
-export async function registerNodeDns(nodeId: number, ip: string): Promise<void> {
-  if (!config.pdns.zone || !config.pdns.apiKey) return;
+// 🔴 08.09: запись перестала быть «для удобства». С переходом новых узлов на VLESS+WS+TLS
+// (см. scripts/install-vless-ws-tls.sh) домен стал НЕСУЩИМ: на него выписывается сертификат
+// Let's Encrypt, и без работающей A-записи узел просто не поднимется. Поэтому теперь:
+// 1) запись заводится ДО установки, а не после успеха (иначе certbot нечего проверять);
+// 2) функция сообщает результат, а вызывающий решает, что делать при провале —
+//    провижининг откатывается на Reality, которому домен не нужен.
+/** Имя узла в нашей зоне. null — зона не настроена, доменных протоколов не будет. */
+export function nodeDomain(nodeId: number): string | null {
+  return config.pdns.zone ? `node${nodeId}.${config.pdns.zone}` : null;
+}
+
+/** true — A-запись заведена и можно выписывать сертификат. */
+export async function registerNodeDns(nodeId: number, ip: string): Promise<boolean> {
+  if (!config.pdns.zone || !config.pdns.apiKey) return false;
 
   const name = `node${nodeId}.${config.pdns.zone}.`;
   const body = {
@@ -34,9 +44,12 @@ export async function registerNodeDns(nodeId: number, ip: string): Promise<void>
       body: JSON.stringify(body),
     });
     if (!res.ok) {
-      console.warn(`⚠️ registerNodeDns(${nodeId}): PowerDNS ответил ${res.status} — узел это не блокирует.`);
+      console.warn(`⚠️ registerNodeDns(${nodeId}): PowerDNS ответил ${res.status}.`);
+      return false;
     }
+    return true;
   } catch (e) {
     console.warn(`⚠️ registerNodeDns(${nodeId}): PowerDNS недоступен (${e instanceof Error ? e.message : e}).`);
+    return false;
   }
 }

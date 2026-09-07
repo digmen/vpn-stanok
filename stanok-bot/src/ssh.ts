@@ -25,6 +25,10 @@ const SCRIPTS: Record<NodeProtocol, { add: string; revoke: string }> = {
     add: path.resolve(__dirname, '../../seller-bot/scripts/add-vless-reality-peer.sh'),
     revoke: path.resolve(__dirname, '../../seller-bot/scripts/revoke-vless-reality-peer.sh'),
   },
+  vless_ws_tls: {
+    add: path.resolve(__dirname, '../../seller-bot/scripts/add-vless-ws-tls-peer.sh'),
+    revoke: path.resolve(__dirname, '../../seller-bot/scripts/revoke-vless-ws-tls-peer.sh'),
+  },
 };
 
 export interface RemoteInstallOptions {

@@ -31,7 +31,18 @@ export const config = {
   // Какой протокол установлен НА ЭТОМ сервере (primary/local-локация) — station
   // (provision.ts/deploy-seller.ts) пишет это в .env при разворачивании, до 05.09
   // переменной не было вообще, отсутствие = amneziawg (все узлы были только им).
-  primaryProtocol: (process.env.PRIMARY_PROTOCOL === 'vless_reality' ? 'vless_reality' : 'amneziawg') as
-    | 'amneziawg'
-    | 'vless_reality',
+  // 🔴 08.09: список стал закрытым перечислением, а не сравнением с одним значением.
+  // Раньше здесь было `=== 'vless_reality' ? ... : 'amneziawg'`, и появление третьего
+  // протокола молча делало бы узел «амнезийным»: бот звал бы AmneziaWG-скрипты на
+  // сервере, где их нет. Тот же класс бага, что уже ловили с PRIMARY_PROTOCOL=undefined
+  // (узлы #12/#16/#18, 07.09) — неизвестное значение не должно тихо превращаться в
+  // рабочее-но-неверное.
+  primaryProtocol: ((): 'amneziawg' | 'vless_reality' | 'vless_ws_tls' => {
+    const v = process.env.PRIMARY_PROTOCOL;
+    if (v === 'vless_reality' || v === 'vless_ws_tls' || v === 'amneziawg') return v;
+    if (v) console.warn(`⚠️ PRIMARY_PROTOCOL="${v}" не распознан — считаю amneziawg. Проверь .env узла.`);
+    // Пусто = узел заведён до 05.09, когда протокол был один. Это единственный
+    // случай, когда умолчание честное.
+    return 'amneziawg';
+  })(),
 };
