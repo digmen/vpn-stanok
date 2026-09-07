@@ -17,6 +17,7 @@ import { checkNodeAlive } from './ssh.js';
 import { logEvent } from './events.js';
 import { decrypt } from './crypto.js';
 import { commission, revenueReport, syncNode } from './revenue.js';
+import { backupAllPrimaries } from './backup.js';
 
 const bot = new Bot<MyContext>(config.botToken);
 
@@ -296,6 +297,22 @@ async function collectRevenue(): Promise<void> {
 }
 setInterval(() => void collectRevenue(), 6 * 60 * 60 * 1000);
 void collectRevenue(); // первый заход сразу при старте
+
+// Бэкап данных владельцев: раз в сутки стягиваем /root/seller-bot-data со всех живых
+// primary-узлов к себе (см. backup.ts — зачем и что именно). Не блокирует онбординг:
+// если сервер временно недоступен, просто пропускаем этот день, старый бэкап цел.
+//
+// 🔴 07.09: заведено после живого случая (Ramazan_LS) — хостер пересоздал VPS с новым
+// IP, старый сервер умер безвозвратно, а вместе с ним и все настройки бота-продавца.
+// До этого дня такого бэкапа не было вообще — восстанавливать было НЕЧЕГО.
+async function backupOwnersData(): Promise<void> {
+  const r = await backupAllPrimaries();
+  if (r.failures.length > 0) {
+    await notifyAdmins(bot.api, `⚠️ Суточный бэкап настроек: ${r.ok} ок, ${r.fail} не удалось:\n${r.failures.join('\n')}`);
+  }
+}
+setInterval(() => void backupOwnersData(), 24 * 60 * 60 * 1000);
+void backupOwnersData(); // первый заход сразу при старте
 
 await bot.start({
   onStart: (info) => console.log(`Станок-бот @${info.username} запущен`),

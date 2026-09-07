@@ -2,7 +2,7 @@ import type { Conversation, ConversationFlavor } from '@grammyjs/conversations';
 import { InlineKeyboard, type Context } from 'grammy';
 import { config } from './config.js';
 import { decrypt, encrypt } from './crypto.js';
-import { findNodeByIpOfOtherUser, getPrimaryReadyNode, upsertNode } from './db.js';
+import { demoteNode, findNodeByIpOfOtherUser, getPrimaryNodeAny, getPrimaryReadyNode, setReplacedNodeId, upsertNode } from './db.js';
 import { logEvent, type FunnelStep, type SideStep } from './events.js';
 import { checkSshPort, preflightMessage } from './preflight.js';
 import { checkIp, ipProblemMessage, isNonEmptySecret, isValidBotToken } from './validate.js';
@@ -177,6 +177,9 @@ export async function onboarding(conversation: MyConversation, ctx: MyContext) {
     conversation.external(() => logEvent({ id: from.id, username: from.username }, step, detail));
 
   const primary = await conversation.external(() => getPrimaryReadyNode(from.id));
+  // Последний primary этого владельца НЕЗАВИСИМО от статуса — нужен ниже, чтобы
+  // отличить «умер, это его замена» от «жив, это вторая точка» без переспросов.
+  const primaryAny = await conversation.external(() => getPrimaryNodeAny(from.id));
 
   const ip = await ipThatAnswers(conversation, ctx, from.id, track);
   const protocol = NEW_NODE_PROTOCOL;
@@ -189,12 +192,12 @@ export async function onboarding(conversation: MyConversation, ctx: MyContext) {
   });
   await track('password_ok'); // сам пароль в журнал не попадает — только факт
 
-  // Уже есть бот → этот сервер просто добавит ему ещё одну точку выдачи VPN.
-  // Токен НЕ спрашиваем — используем токен primary (он и так уже зашифрован в его
-  // строке, отдельно этой записи не нужен, но колонка NOT NULL — переносим тот же).
+  // Токен бота-продавца у владельца всегда ОДИН (он один раз завёл его в BotFather) —
+  // если уже видели хоть одну его заявку в primary, переспрашивать нечего, берём
+  // сохранённый, что бы ни случилось дальше с самим сервером.
   let sellerToken: string;
-  if (primary) {
-    sellerToken = decrypt(primary.seller_token_enc);
+  if (primaryAny) {
+    sellerToken = decrypt(primaryAny.seller_token_enc);
     await track('secondary_node');
   } else {
     sellerToken = await askStep(conversation, ctx, {
@@ -216,7 +219,23 @@ export async function onboarding(conversation: MyConversation, ctx: MyContext) {
   // приткнуть — provisionNode() требует ready-primary, а его только что стёрли.
   // Фикс: если IP совпал с IP уже существующего primary этого же юзера, это не
   // новый секундарь, а пересдача того же primary — и is_primary обязан остаться true.
-  const isResubmittedPrimary = primary?.server_ip === ip;
+  const isResubmittedPrimary = primaryAny?.server_ip === ip;
+
+  // 🔴 07.09: баг живьём (Ramazan_LS, узел #18→#19) — хостер выдал совсем ДРУГОЙ IP
+  // после пересоздания сервера (не тот же самый, тут isResubmittedPrimary не спасает),
+  // а прошлый primary всё ещё числился 'ready' в базе. Код решил, что это ВТОРОЙ,
+  // настоящий, доп. сервер — и попытался прикрепить его к первому (attachLocationToPrimary),
+  // а тот на самом деле мёртв: EHOSTUNREACH при попытке зайти на него самого.
+  // Фикс: если IP другой, а старый primary СЕЙЧАС физически недоступен (живая проверка,
+  // не то что записано в status) — это не вторая точка, это замена умершего сервера.
+  // Дальше работает как pesдача primary (is_primary=true), просто с другим IP; старый
+  // узел снимаем с primary/ready, чтобы не путался под ногами и не пинговался монитором
+  // вечно. Если старый primary НА САМОМ ДЕЛЕ жив — ничего не меняется, обычная вторая точка.
+  let isReplacement = false;
+  if (primaryAny && !isResubmittedPrimary) {
+    const oldAlive = primary ? (await conversation.external(() => checkSshPort(primaryAny.server_ip))).ok : false;
+    if (!oldAlive) isReplacement = true;
+  }
 
   const id = await conversation.external(() =>
     upsertNode({
@@ -225,20 +244,32 @@ export async function onboarding(conversation: MyConversation, ctx: MyContext) {
       serverIp: ip,
       rootPasswordEnc: encrypt(rootPassword),
       sellerTokenEnc: encrypt(sellerToken),
-      isPrimary: !primary || isResubmittedPrimary,
+      isPrimary: !primaryAny || isResubmittedPrimary || isReplacement,
       protocol,
     }),
   );
+
+  if (isReplacement && primaryAny) {
+    await conversation.external(() => {
+      demoteNode(primaryAny.id);
+      setReplacedNodeId(id, primaryAny.id);
+    });
+    await track('primary_replaced', `${primaryAny.server_ip} → ${ip}`);
+  }
 
   const kb = new InlineKeyboard().text('🚀 Поднять VPN', `provision:${id}`);
   await ctx.reply(
     isResubmittedPrimary
       ? `✅ Данные приняты (сервер ${ip}).\nЭто твой основной сервер — переустановлю бота на нём заново. ` +
           'Жми «Поднять VPN».'
-      : primary
-        ? `✅ Данные приняты (сервер ${ip}).\nЭто будет ещё одна точка в твоём уже работающем боте — ` +
-            'отдельного бота заводить не нужно. Жми «Поднять VPN».'
-        : `✅ Данные приняты (сервер ${ip}).\nЖми «Поднять VPN» — я всё настрою сам.`,
+      : isReplacement
+        ? `✅ Данные приняты (сервер ${ip}).\nПрошлый твой сервер сейчас недоступен — считаю это его заменой: ` +
+            'переустановлю бота на новом, а старые настройки (цены, локации) подтяну из бэкапа, если он есть. ' +
+            'Жми «Поднять VPN».'
+        : primaryAny
+          ? `✅ Данные приняты (сервер ${ip}).\nЭто будет ещё одна точка в твоём уже работающем боте — ` +
+              'отдельного бота заводить не нужно. Жми «Поднять VPN».'
+          : `✅ Данные приняты (сервер ${ip}).\nЖми «Поднять VPN» — я всё настрою сам.`,
     { reply_markup: kb },
   );
 }

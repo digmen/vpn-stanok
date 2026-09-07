@@ -9,6 +9,7 @@ import { testHandshake, testVlessRealityHandshake } from './handshake-test.js';
 import { deploySeller, getBotUsername } from './deploy-seller.js';
 import { attachLocationToPrimary } from './attach-location.js';
 import { registerNodeDns } from './dns.js';
+import { restoreBackup } from './backup.js';
 import { testFromRussia } from './ru-probe.js';
 import { enableRelay } from './relay.js';
 import { notifyAdmins } from './admin.js';
@@ -155,6 +156,28 @@ export async function provisionNode(
       setNodeStatus(nodeId, 'ready');
       void registerNodeDns(nodeId, node.server_ip);
 
+      // 🔴 07.09: если этот сервер встал НА ЗАМЕНУ мёртвому primary (см. onboarding.ts —
+      // node.replaced_node_id ставится там), deploySeller выше только что создал бота
+      // с ЧИСТЫМИ настройками по умолчанию — цены, скрытые локации, доп. сервера и
+      // ключи к ним, кэш «Мой VPN» были только на старом (мёртвом) сервере и без этого
+      // восстановления терялись бы навсегда. Кладём последний суточный бэкап владельца
+      // поверх — best-effort, если бэкапа ещё не было (первые сутки нового владельца),
+      // просто продолжаем с чистыми настройками, как раньше.
+      let restoreWarning = '';
+      if (node.replaced_node_id) {
+        const restore = await restoreBackup(node.tg_user_id, node.server_ip, password);
+        if (restore.restored) {
+          restoreWarning = '\n\n♻️ Прошлый сервер был недоступен — поднял бота на новом и подтянул старые настройки (цены, локации) из вчерашнего бэкапа.';
+        } else if (!restore.ok) {
+          restoreWarning =
+            `\n\n⚠️ Прошлый сервер был недоступен, поставил бота на новом заново, но восстановить старые ` +
+            `настройки не получилось (${restore.detail.slice(0, 150)}) — цены и доп. локации придётся настроить заново.`;
+          await notifyAdmins(api, `⚠️ Узел #${nodeId}: восстановление бэкапа после замены primary упало: ${restore.detail.slice(0, 300)}`);
+        } else {
+          restoreWarning = '\n\n♻️ Прошлый сервер был недоступен — поднял бота на новом. Бэкапа настроек ещё не было (снимается раз в сутки), начинаем с чистых.';
+        }
+      }
+
       // 🔴 07.09: RU-проба провалилась — сами включаем релей, не только предупреждаем.
       // Seller-bot уже задеплоен строкой выше — cli-set-relay.ts там точно есть.
       if (ruFailed && !ruFailed.ok) {
@@ -186,6 +209,7 @@ export async function provisionNode(
         '🎉 Готово! Твой VPN-бизнес запущен.\n\n' +
           'Открой своего бота → /start → «🆓 Мой VPN» — заберёшь свой VPN там.\n' +
           appLine +
+          restoreWarning +
           ruWarning,
         kb,
       );

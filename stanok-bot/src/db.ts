@@ -46,6 +46,7 @@ for (const sql of [
   `ALTER TABLE nodes ADD COLUMN last_health_ok INTEGER`,
   `ALTER TABLE nodes ADD COLUMN relay_host TEXT`,
   `ALTER TABLE nodes ADD COLUMN relay_port INTEGER`,
+  `ALTER TABLE nodes ADD COLUMN replaced_node_id INTEGER`,
 ]) {
   try {
     db.exec(sql);
@@ -84,6 +85,10 @@ export interface NodeRow {
    *  NULL у всех, кому релей не нужен. */
   relay_host: string | null;
   relay_port: number | null;
+  /** Если этот узел встал НА МЕСТО прежнего мёртвого primary (см. onboarding.ts —
+   *  «пересоздал сервер, старый недоступен») — id того узла, для истории/логов.
+   *  NULL у всех обычных узлов. */
+  replaced_node_id: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -186,6 +191,30 @@ export function getPrimaryReadyNode(tgUserId: number): NodeRow | undefined {
   return db
     .prepare("SELECT * FROM nodes WHERE tg_user_id = ? AND is_primary = 1 AND status = 'ready' ORDER BY id LIMIT 1")
     .get(tgUserId) as NodeRow | undefined;
+}
+
+// 🔴 07.09: последний primary владельца НЕЗАВИСИМО от статуса — нужен, чтобы отличить
+// «у него уже есть живой бот, добавляет вторую точку» от «его прошлый primary умер
+// (сервер пересоздан у хостера, IP другой), это его же новый сервер на замену».
+// Живость проверяется отдельно (checkSshPort) в onboarding.ts — тут только «кто вообще
+// последний, кого он заводил как primary», статус не фильтруем специально.
+export function getPrimaryNodeAny(tgUserId: number): NodeRow | undefined {
+  return db
+    .prepare('SELECT * FROM nodes WHERE tg_user_id = ? AND is_primary = 1 ORDER BY id DESC LIMIT 1')
+    .get(tgUserId) as NodeRow | undefined;
+}
+
+/** Снимает с узла флаг primary и помечает потерянным — вызывается, когда владелец
+ *  прислал новый сервер НА ЗАМЕНУ этому (старый недоступен). Не трогаем сам узел
+ *  иначе: пусть его история (IP, дата) остаётся в базе, просто он больше не участвует
+ *  ни в мониторинге (getReadyNodes), ни в поиске primary (getPrimaryReadyNode/Any
+ *  для будущих новых primary всё равно найдут более свежую запись по ORDER BY id DESC). */
+export function demoteNode(id: number): void {
+  db.prepare("UPDATE nodes SET is_primary = 0, status = 'lost', updated_at = datetime('now') WHERE id = ?").run(id);
+}
+
+export function setReplacedNodeId(id: number, replacedNodeId: number): void {
+  db.prepare('UPDATE nodes SET replaced_node_id = ? WHERE id = ?').run(replacedNodeId, id);
 }
 
 export function setNodeStatus(id: number, status: string): void {

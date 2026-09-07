@@ -48,7 +48,10 @@ export type SideStep =
   | 'provision_fail'
   // Токен не спрашивали — у владельца уже есть готовый бот, этот сервер идёт
   // доп. локацией в него (см. onboarding.ts, фикс 409 от дублей-ботов 25.08).
-  | 'secondary_node';
+  | 'secondary_node'
+  // Прошлый primary владельца оказался физически недоступен — новый сервер занял
+  // его место, старый снят с primary/ready (см. onboarding.ts, фикс 07.09).
+  | 'primary_replaced';
 
 export interface EventRow {
   id: number;
