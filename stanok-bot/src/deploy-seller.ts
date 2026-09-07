@@ -114,17 +114,54 @@ export async function updateSellerToken(host: string, password: string, token: s
   });
   try {
     const envPath = `${REMOTE.SELLER_DIR}/.env`;
-    // Токен передаём через переменную окружения удалённого шелла, а не в тексте команды —
-    // иначе он светится в списке процессов (ps) на чужом сервере.
-    const res = await ssh.execCommand(
-      `grep -v '^SELLER_BOT_TOKEN=' ${envPath} > ${envPath}.tmp; ` +
-        `printf 'SELLER_BOT_TOKEN=%s\\n' "$NEW_TOKEN" >> ${envPath}.tmp; ` +
-        `mv ${envPath}.tmp ${envPath}; chmod 600 ${envPath}; ` +
-        `cd ${REMOTE.SELLER_DIR} && pm2 restart seller-bot --update-env`,
-      { execOptions: { env: { NEW_TOKEN: token } } },
-    );
-    if (res.code !== 0) {
-      throw new Error('не удалось применить новый токен: ' + (res.stderr || res.stdout).slice(0, 300));
+    // 🔴 07.09, живой провал прямо в тот же вечер: сначала токен передавался через
+    // `execOptions.env` — чтобы не светился в `ps` на чужом сервере. Но sshd по умолчанию
+    // принимает только LANG/LC_* (`AcceptEnv`), так что переменная до сервера не доезжала
+    // и в .env писалась ПУСТАЯ строка. Бот оставался сломанным, а станок рапортовал «готово»,
+    // потому что сам shell отработал с кодом 0.
+    // Теперь: секрет идёт через stdin (в `ps` его так же не видно, но это не зависит от
+    // настроек sshd), и главное — результат ПРОВЕРЯЕТСЯ, а не предполагается.
+    const script = [
+      'read -r NEW_TOKEN',
+      '[ -n "$NEW_TOKEN" ] || { echo "ERR: токен не дошёл до сервера"; exit 1; }',
+      `grep -v '^SELLER_BOT_TOKEN=' ${envPath} > ${envPath}.tmp`,
+      `printf 'SELLER_BOT_TOKEN=%s\\n' "$NEW_TOKEN" >> ${envPath}.tmp`,
+      `mv ${envPath}.tmp ${envPath}`,
+      `chmod 600 ${envPath}`,
+      // Проверка №1: строка реально записалась и не пустая.
+      `LEN=$(awk -F= '/^SELLER_BOT_TOKEN=/{print length($2)}' ${envPath})`,
+      '[ "${LEN:-0}" -gt 20 ] || { echo "ERR: токен записался пустым (длина ${LEN:-0})"; exit 1; }',
+      `cd ${REMOTE.SELLER_DIR}`,
+      // Процесс мог быть остановлен (мы сами гасим его при мёртвом токене) — restart поднимет.
+      'pm2 restart seller-bot --update-env >/dev/null 2>&1 || pm2 start npm --name seller-bot -- start >/dev/null 2>&1',
+      // Проверка №2: бот реально ЖИВЁТ, а не крутится в цикле падений. Смотрим счётчик
+      // перезапусков дважды с паузой: если он растёт — процесс падает и поднимается заново.
+      'STAT() { pm2 jlist 2>/dev/null | node -e \'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const a=JSON.parse(s).find(x=>x.name==="seller-bot");process.stdout.write(a?a.pm2_env.status+" "+a.pm2_env.restart_time:"none 0")}catch(e){process.stdout.write("none 0")}})\'; }',
+      'sleep 8',
+      'A=$(STAT)',
+      'sleep 7',
+      'B=$(STAT)',
+      'echo "CHECK before=[$A] after=[$B]"',
+    ].join('; ');
+
+    const res = await ssh.execCommand(script, { stdin: token + '\n' });
+    const out = `${res.stdout}\n${res.stderr}`;
+    if (res.code !== 0 || out.includes('ERR:')) {
+      throw new Error('не удалось применить новый токен: ' + out.replace(/\s+/g, ' ').slice(0, 300));
+    }
+
+    // Разбираем итог проверки №2: "CHECK before=[online 5] after=[online 5]"
+    const m = out.match(/CHECK before=\[(\w+) (\d+)\] after=\[(\w+) (\d+)\]/);
+    if (!m) throw new Error('не удалось проверить, поднялся ли бот: ' + out.replace(/\s+/g, ' ').slice(0, 200));
+    const [, , restartsBefore, statusAfter, restartsAfter] = m;
+    if (statusAfter !== 'online') {
+      throw new Error(`бот не запустился (статус «${statusAfter}») — токен записан, но процесс не поднялся`);
+    }
+    if (Number(restartsAfter) > Number(restartsBefore)) {
+      throw new Error(
+        'бот падает и перезапускается по кругу даже с новым токеном — дело не в токене, ' +
+          'нужен разбор логов на сервере',
+      );
     }
   } finally {
     ssh.dispose();
