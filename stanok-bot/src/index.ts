@@ -22,6 +22,7 @@ import { checkNodeAlive } from './ssh.js';
 import { hadRecentEvent, logEvent } from './events.js';
 import { isValidBotToken } from './validate.js';
 import { decrypt } from './crypto.js';
+import { collectSetup, formatSetupReport } from './setup-report.js';
 import { commission, revenueReport, syncNode } from './revenue.js';
 import { backupAllPrimaries } from './backup.js';
 import { broadcast, lastBroadcast, undoLast } from './broadcast.js';
@@ -134,7 +135,8 @@ bot.command('help', async (ctx) => {
   const admin =
     '\n\n/say <текст> — рассылка владельцам (сначала покажу список получателей)' +
     '\n/undo — откатить последнюю рассылку' +
-    '\n/nosay <id> — исключить узел из рассылок';
+    '\n/nosay <id> — исключить узел из рассылок' +
+    '\n/setup — как идёт настройка оплаты картой у владельцев и где они спотыкаются';
   await ctx.reply(config.adminIds.includes(ctx.from?.id ?? -1) ? base + admin : base);
 });
 
@@ -144,6 +146,17 @@ bot.command('token', async (ctx) => {
 });
 
 // Мониторинг всех узлов (только админ): статус + живая проверка доступности
+// Где владельцы спотыкаются, настраивая оплату картой (только админ). Это не мониторинг,
+// а материал для инструкций: «не работает» без деталей приходит к нам постоянно, а причина
+// видна только в момент ошибки — см. setup-report.ts.
+bot.command('setup', async (ctx) => {
+  if (!config.adminIds.includes(ctx.from?.id ?? -1)) return;
+  const wait = await ctx.reply('Собираю с узлов…');
+  const rows = await collectSetup();
+  await ctx.api.deleteMessage(ctx.chat.id, wait.message_id).catch(() => {});
+  await ctx.reply(formatSetupReport(rows));
+});
+
 bot.command('nodes', async (ctx) => {
   if (!config.adminIds.includes(ctx.from?.id ?? -1)) return;
   const nodes = getAllNodes();

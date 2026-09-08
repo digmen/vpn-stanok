@@ -46,6 +46,7 @@ import { readOwnerConfig, saveOwnerConfig } from './owner-config.js';
 import { buildStats, recordEvent } from './stats.js';
 import { hasUsedTrial, markTrialUsed, trialCount } from './trials.js';
 import { checkUpdate, currentVersion, startSelfUpdate } from './update.js';
+import { logSetup } from './setup-log.js';
 import {
   classifyKeyInput,
   eventKind,
@@ -1058,6 +1059,7 @@ bot.on('message:text', async (ctx) => {
     // Самые частые «не то»: вместо ключа присылают ссылку на товар или токен бота.
     // Молча отвергнуть — значит оставить человека гадать, что он сделал не так.
     if (input.kind === 'link') {
+      logSetup('key-link');
       await ctx.reply(
         '❌ Это ссылка на товар, а не ключ. Ссылки присылать не нужно — бот берёт их сам.\n\n' +
           'Ключ лежит в кабинете Tribute: их бот → «…» → Настройки → API-ключи. Это длинная строка ' +
@@ -1066,10 +1068,12 @@ bot.on('message:text', async (ctx) => {
       return;
     }
     if (input.kind === 'bot-token') {
+      logSetup('key-bot-token');
       await ctx.reply('❌ Это токен бота из BotFather, а не ключ Tribute. Нужен ключ из кабинета Tribute → Настройки → API-ключи.');
       return;
     }
     if (input.kind === 'short') {
+      logSetup('key-short', `длина ${key.length}`);
       await ctx.reply('❌ Слишком короткая строка для ключа — похоже, скопировалась не целиком. Скопируй ключ полностью и пришли снова.');
       return;
     }
@@ -1079,6 +1083,7 @@ bot.on('message:text', async (ctx) => {
       // Ключ не сохраняем, пока он не доказал работоспособность: сохранённый нерабочий
       // выглядит как «подключено», а оплата при этом не придёт вообще. И «не тот ключ»
       // отделено от «не смог проверить» — это разные беды с разными действиями.
+      logSetup(v.reason === 'invalid' ? 'key-invalid' : 'key-network', v.detail);
       await ctx.reply(
         v.reason === 'invalid'
           ? '❌ Tribute не принял этот ключ. Проверь, что копируешь его целиком и из своего кабинета.'
@@ -1088,6 +1093,7 @@ bot.on('message:text', async (ctx) => {
     }
 
     updateSettings((cur) => ({ ...cur, tribute: { ...cur.tribute, apiKey: key } }));
+    logSetup('key-ok', `товаров ${v.rows.length}`);
     productCache = { at: Date.now(), rows: v.rows };
     syncTributeServer();
     if (v.rows.length === 0) {
@@ -1584,6 +1590,7 @@ bot.callbackQuery('tribtoggle', async (ctx) => {
   if (!isOwner(ctx.from?.id)) return;
   updateSettings((cur) => ({ ...cur, tribute: { ...cur.tribute, enabled: !cur.tribute.enabled } }));
   syncTributeServer();
+  logSetup(getSettings().tribute.enabled ? 'enabled' : 'disabled');
   await showCard(ctx, getSettings().tribute.enabled ? '🟢 Приём оплат картой включён.' : '🔴 Приём оплат картой выключен.');
 });
 
@@ -1594,6 +1601,7 @@ bot.callbackQuery('tribcheck', async (ctx) => {
   await ctx.answerCallbackQuery();
   if (!isOwner(ctx.from?.id)) return;
   const r = await selfCheck();
+  logSetup(r.ok ? 'selfcheck-ok' : 'selfcheck-fail', r.text);
   const st = tributeStatus();
   await showCard(
     ctx,
@@ -1630,6 +1638,7 @@ bot.callbackQuery(/^tribpkg:(.+)$/, async (ctx) => {
     return;
   }
   if (rows.length === 0) {
+    logSetup('bind-empty');
     await showCard(ctx, '❌ В твоём Tribute нет ни одного товара — сначала создай их там, потом привязывай.');
     return;
   }
@@ -1648,12 +1657,14 @@ bot.callbackQuery(/^tribset:([^:]+):(.+)$/, async (ctx) => {
       ...cur,
       tribute: { ...cur.tribute, products: cur.tribute.products.filter((x) => x.pkgId !== pkgId) },
     }));
+    logSetup('bind-off', pkgId);
     await showCard(ctx, '🗑 Привязка убрана — оплата картой у этого тарифа больше не предлагается.');
     return;
   }
   const rows = await tributeProducts().catch(() => [] as TributeProduct[]);
   const prod = rows.find((r) => r.id === productId);
   if (!prod) {
+    logSetup('bind-gone', productId);
     await showCard(ctx, '❌ Такого товара в Tribute больше нет — обнови список и выбери заново.');
     return;
   }
@@ -1662,6 +1673,7 @@ bot.callbackQuery(/^tribset:([^:]+):(.+)$/, async (ctx) => {
   const clash = getSettings().tribute.products.find((x) => x.productId === prod.id && x.pkgId !== pkgId);
   if (clash) {
     const other = findPackage(clash.pkgId);
+    logSetup('bind-clash', `товар ${prod.id} уже у тарифа ${clash.pkgId}`);
     await showCard(
       ctx,
       `❌ Этот товар уже привязан к тарифу ${other ? other.days + ' дн.' : clash.pkgId}. ` +
@@ -1683,6 +1695,7 @@ bot.callbackQuery(/^tribset:([^:]+):(.+)$/, async (ctx) => {
     },
   }));
   syncTributeServer();
+  logSetup('bind-ok', `${pkgId} → ${prod.id}`);
   await showCard(ctx, `✅ Тариф привязан к «${prod.name}» (${priceLabel(prod)}).`);
 });
 
@@ -1702,6 +1715,7 @@ async function handleTributeEvent(ev: TributeWebhookEvent): Promise<void> {
   // верно и связь есть. Молча его проглотить значит лишить владельца этой проверки:
   // снаружи «дошло» и «не дошло» выглядят одинаково.
   if (kind === 'other') {
+    logSetup('test-event', ev.name);
     const owner = getOwnerId();
     if (owner) {
       await bot.api
@@ -1739,6 +1753,7 @@ async function handleTributeEvent(ev: TributeWebhookEvent): Promise<void> {
   }
 
   if (!pkg) {
+    logSetup('paid-unbound', `товар ${productId}`);
     console.error(
       `Tribute: оплачен товар ${productId} (тип ${typeof productId}), не привязанный ни к одному тарифу. ` +
         `Событие: ${JSON.stringify(ev).slice(0, 500)}`,
@@ -1760,6 +1775,7 @@ async function handleTributeEvent(ev: TributeWebhookEvent): Promise<void> {
 
   const charge = `tribute:${p.purchase_id ?? `${p.subscription_id}:${p.period_id}`}`;
   const ok = await deliverPurchase({ userId: buyer, pkg, stars: 0, charge, method: 'card' });
+  logSetup('paid-ok', `${pkg.days} дн., выдано: ${ok ? 'да' : 'нет'}`);
   if (ownerId) {
     const sum = typeof p.amount === 'number' ? ` на ${priceLabel({ amount: p.amount, currency: String(p.currency ?? '') })}` : '';
     await bot.api
@@ -1784,6 +1800,7 @@ syncTributeServer(handleTributeEvent, () => {
   const owner = getOwnerId();
   if (!owner || Date.now() - lastBadSigNotice < 60 * 60 * 1000) return;
   lastBadSigNotice = Date.now();
+  logSetup('badsig');
   void bot.api
     .sendMessage(
       owner,
