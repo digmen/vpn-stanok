@@ -10,7 +10,7 @@ import path from 'node:path';
 process.env.SELLER_BOT_TOKEN ??= '1:test';
 process.env.DATA_DIR ??= fs.mkdtempSync(path.join(os.tmpdir(), 'seller-trib-'));
 
-const { classifyKeyInput, dedupeKey, eventKind, priceLabel, verifySignature } = await import('./tribute.js');
+const { classifyKeyInput, dedupeKey, eventKind, isSelfTest, priceLabel, purchaseRef, verifySignature } = await import('./tribute.js');
 const { normalize, packageForTributeProduct, tributeUrlFor } = await import('./settings.js');
 
 // 🔴 Цена ошибки здесь — «человек заплатил, а ключа нет». Именно так уже случалось:
@@ -106,4 +106,22 @@ test('ключ чистится от того, как его скопирова�
   assert.deepEqual(classifyKeyInput(`Api-Key: ${key}`), { kind: 'ok', key });
   assert.deepEqual(classifyKeyInput(`"${key}"`), { kind: 'ok', key });
   assert.deepEqual(classifyKeyInput(`«${key}»`), { kind: 'ok', key });
+});
+
+// 🔴 09.09: проверка сквозного пути на живом узле выдала настоящий ключ настоящему
+// человеку. Снаружи это неотличимо от того, что бот раздаёт доступ сам по себе — и
+// доверия к нему после такого не остаётся. Ключ уезжает только по настоящей оплате.
+test('без идентификатора покупки выдавать нечего', () => {
+  assert.equal(purchaseRef({ name: 'new_digital_product', payload: { telegram_user_id: 1, product_id: 5 } }), null);
+  assert.equal(purchaseRef({ name: 'test' }), null);
+  assert.equal(purchaseRef({ name: 'x', payload: { purchase_id: 'abc' } }), 'abc');
+  // У подписки идентификатор составной — покупка настоящая, выдавать надо.
+  assert.equal(purchaseRef({ name: 'x', payload: { subscription_id: 7, period_id: 2 } }), '7:2');
+});
+
+test('наша проверка пути не считается покупкой', () => {
+  assert.ok(isSelfTest({ name: 'new_digital_product', payload: { purchase_id: 'selftest-123' } }));
+  assert.ok(!isSelfTest({ name: 'new_digital_product', payload: { purchase_id: 'probe-123' } }));
+  assert.ok(!isSelfTest({ name: 'new_digital_product', payload: { subscription_id: 1, period_id: 1 } }));
+  assert.ok(!isSelfTest({ name: 'test' }));
 });

@@ -173,6 +173,34 @@ export function dedupeKey(ev: TributeWebhookEvent): string {
   return `raw:${ev.name}:${p.telegram_user_id}:${p.product_id ?? p.subscription_id}:${ev.created_at}`;
 }
 
+/**
+ * Признак настоящей покупки: Tribute даёт ей идентификатор (разовому товару — purchase_id,
+ * подписке — пару subscription_id + period_id). Событие без него настоящей покупкой не
+ * является: так приходят служебные и тестовые запросы. Выдавать по такому ключ нельзя —
+ * это ровно тот случай, когда доступ уезжает человеку «сам по себе».
+ */
+export function purchaseRef(ev: TributeWebhookEvent): string | null {
+  const p = ev.payload ?? {};
+  if (typeof p.purchase_id === 'string' && p.purchase_id) return p.purchase_id;
+  if (p.subscription_id !== undefined && p.period_id !== undefined) return `${p.subscription_id}:${p.period_id}`;
+  return null;
+}
+
+/** Префикс наших собственных проверок. Событие с ним проходит весь путь, но НИЧЕГО не выдаёт. */
+export const SELFTEST_PREFIX = 'selftest-';
+
+/**
+ * Наша проверка, а не покупка.
+ *
+ * 🔴 Заведено 09.09 после того, как проверка сквозного пути на живом узле выдала настоящий
+ * ключ настоящему человеку — и со стороны это выглядело как самопроизвольное срабатывание
+ * бота. Проверять путь надо, выдавать при этом нельзя: теперь одно отделено от другого
+ * явным признаком в подписанном теле события.
+ */
+export function isSelfTest(ev: TributeWebhookEvent): boolean {
+  return (purchaseRef(ev) ?? '').startsWith(SELFTEST_PREFIX);
+}
+
 export function verifySignature(rawBody: string, signature: string | undefined, apiKey: string): boolean {
   if (!apiKey || !signature) return false;
   const expected = createHmac('sha256', apiKey).update(rawBody).digest('hex');

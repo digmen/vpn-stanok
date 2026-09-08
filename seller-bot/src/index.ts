@@ -50,6 +50,8 @@ import { logSetup } from './setup-log.js';
 import {
   classifyKeyInput,
   eventKind,
+  isSelfTest,
+  purchaseRef,
   priceLabel,
   selfCheck,
   tributeStatus,
@@ -1773,7 +1775,35 @@ async function handleTributeEvent(ev: TributeWebhookEvent): Promise<void> {
     return;
   }
 
-  const charge = `tribute:${p.purchase_id ?? `${p.subscription_id}:${p.period_id}`}`;
+  // 🔴 Две проверки перед выдачей — обе про одно: ключ уезжает человеку только по
+  // настоящей оплате, и никогда «сам по себе».
+  //
+  // 1. У настоящей покупки есть идентификатор от Tribute. Событие без него покупкой не
+  //    является — так приходят служебные и тестовые запросы.
+  const ref = purchaseRef(ev);
+  if (!ref) {
+    logSetup('paid-no-id', ev.name);
+    console.error(`Tribute: событие «${ev.name}» без признака покупки — выдачи не было: ${JSON.stringify(ev).slice(0, 300)}`);
+    return;
+  }
+  // 2. Наши собственные проверки пути помечены явно и не выдают ничего. Иначе проверка
+  //    сквозного пути присылает живой ключ живому человеку — и выглядит это как
+  //    самопроизвольное срабатывание бота (так и случилось 09.09, ключ ушёл мне).
+  if (isSelfTest(ev)) {
+    logSetup('selftest', `${pkg.days} дн.`);
+    if (ownerId) {
+      await bot.api
+        .sendMessage(
+          ownerId,
+          `🧪 Проверка приёма оплат прошла: событие дошло, подпись сошлась, товар опознан ` +
+            `(тариф ${pkg.days} дн.). Это проверка — ключ никому не выдавался и деньги не списывались.`,
+        )
+        .catch(() => {});
+    }
+    return;
+  }
+
+  const charge = `tribute:${ref}`;
   const ok = await deliverPurchase({ userId: buyer, pkg, stars: 0, charge, method: 'card' });
   logSetup('paid-ok', `${pkg.days} дн., выдано: ${ok ? 'да' : 'нет'}`);
   if (ownerId) {

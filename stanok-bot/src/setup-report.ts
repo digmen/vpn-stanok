@@ -58,6 +58,8 @@ export const EVENT_TITLES: Record<string, string> = {
   badsig: 'стучатся с чужой подписью',
   'test-event': 'тестовый запрос из Tribute дошёл',
   'paid-unbound': 'оплатили непривязанный товар',
+  'paid-no-id': 'событие без признака покупки — выдачи не было',
+  selftest: 'проверка пути прошла (без выдачи)',
   'paid-ok': 'оплата картой прошла',
 };
 
@@ -66,7 +68,7 @@ export function isProblem(event: string): boolean {
   return (
     event.startsWith('key-') && event !== 'key-ok'
       ? true
-      : ['bind-clash', 'bind-empty', 'bind-gone', 'selfcheck-fail', 'badsig', 'paid-unbound'].includes(event)
+      : ['bind-clash', 'bind-empty', 'bind-gone', 'selfcheck-fail', 'badsig', 'paid-unbound', 'paid-no-id'].includes(event)
   );
 }
 
