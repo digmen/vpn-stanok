@@ -19,7 +19,10 @@ export interface Package {
 
 export interface Settings {
   packages: Package[];
-  trial: { enabled: boolean; days: number };
+  /** Пробный период задаётся в ЧАСАХ: владельцы просили выдавать «на сутки», а не
+   *  «на день» — 24, 12, 6. Дни остались только в старых файлах настроек, normalize
+   *  переводит их в часы при первом же чтении. */
+  trial: { enabled: boolean; hours: number };
   /** Реферальная программа: привёл друга — получил долю его срока временем (см.
    *  referrals.ts). Процент задаёт владелец — это его бизнес-решение, не наше. */
   referral: { enabled: boolean; percent: number };
@@ -56,6 +59,19 @@ export function isValidDays(n: number): boolean {
   return Number.isInteger(n) && n >= 1 && n <= LIMITS.MAX_DAYS;
 }
 
+/** Часы пробного периода: от одного часа до того же потолка, что и у тарифов. */
+export function isValidHours(n: number): boolean {
+  return Number.isInteger(n) && n >= 1 && n <= LIMITS.MAX_DAYS * 24;
+}
+
+/** «48» → «2 дн.», «24» → «сутки», «6» → «6 ч.». Владелец вводит часы, а читать
+ *  человеку удобнее днями, когда срок ровно в них укладывается. */
+export function humanHours(h: number): string {
+  if (h === 24) return 'сутки';
+  if (h % 24 === 0) return `${h / 24} дн.`;
+  return `${h} ч.`;
+}
+
 // Стартовый набор тарифов. Базовая цена — то, что владелец уже поставил в старой версии
 // (price.txt): его настройку нельзя терять при обновлении, иначе он молча начнёт продавать дешевле.
 export function defaultPackages(baseStars: number, baseDays: number): Package[] {
@@ -81,11 +97,17 @@ function legacyPrice(): number {
 function fresh(): Settings {
   return {
     packages: defaultPackages(legacyPrice(), config.days),
-    trial: { enabled: false, days: 3 },
+    trial: { enabled: false, hours: 72 },
     referral: { enabled: false, percent: 30 },
     reminder: { enabled: true, days: 2 },
     welcome: { text: null, photo: null },
   };
+}
+
+function trialHours(raw: { hours?: unknown; days?: unknown } | undefined, fallback: number): number {
+  if (isValidHours(Number(raw?.hours))) return Number(raw!.hours);
+  if (isValidDays(Number(raw?.days))) return Number(raw!.days) * 24;
+  return fallback;
 }
 
 // Читаем терпимо: битый или частичный файл не должен ронять бота — добираем дефолтами.
@@ -103,9 +125,12 @@ export function normalize(raw: unknown): Settings {
 
   return {
     packages: packages.length > 0 ? packages : base.packages,
+    // Настройки, записанные до 09.09, хранят пробный период в днях. Читаем их и
+    // переводим в часы — иначе у всех, кто уже настроил пробный, он молча
+    // сбросился бы на умолчание.
     trial: {
       enabled: Boolean(r.trial?.enabled),
-      days: isValidDays(Number(r.trial?.days)) ? Number(r.trial!.days) : base.trial.days,
+      hours: trialHours(r.trial as { hours?: unknown; days?: unknown } | undefined, base.trial.hours),
     },
     // Реферальная программа по умолчанию ВЫКЛЮЧЕНА, в отличие от напоминаний: она
     // раздаёт время за счёт владельца, и включать её за него мы не вправе.

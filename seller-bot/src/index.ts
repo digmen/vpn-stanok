@@ -23,7 +23,7 @@ import {
   takeBanked,
 } from './referrals.js';
 import { createVpnPeer, createVpnPeerAt, createVpnPeersEverywhere, revokePeerAt, type Peer } from './vpn.js';
-import { activeClients, addSubscription, extendForUser, getExpiredPeers, removePeer, revenueStars } from './subscriptions.js';
+import { activeClients, addSubscription, addSubscriptionHours, extendForUser, getExpiredPeers, removePeer, revenueStars } from './subscriptions.js';
 import { APPS, offerConfig, offerConfigs, registerDeliveryHandlers } from './delivery.js';
 import {
   addRemote,
@@ -49,7 +49,9 @@ import { checkUpdate, currentVersion, startSelfUpdate } from './update.js';
 import {
   findPackage,
   getSettings,
+  humanHours,
   isValidDays,
+  isValidHours,
   isValidPercent,
   isValidStars,
   LIMITS,
@@ -76,7 +78,7 @@ function appLinksText(): string {
 // перезапуск специально: зависшее ожидание не должно жевать чужие сообщения.
 type PendingKind =
   | 'pkg-price' | 'pkg-days' | 'pkg-new-days' | 'pkg-new-stars'
-  | 'welcome-text' | 'welcome-photo' | 'trial-days' | 'ref-percent' | 'promo-add'
+  | 'welcome-text' | 'welcome-photo' | 'trial-hours' | 'ref-percent' | 'promo-add'
   // Добавление локации: сначала адрес, потом пароль, потом название
   | 'loc-host' | 'loc-password' | 'loc-title' | 'loc-rename' | 'loc-editip';
 let pending: { kind: PendingKind; arg?: string; at: number } | null = null;
@@ -141,7 +143,7 @@ function clientKeyboard(owner: boolean, userId?: number): Keyboard {
   // был» — вопрос закрывается сам, без обращения к владельцу.
   // У владельца её по-прежнему нет намеренно: у него есть своя «🆓 Мой VPN».
   if (s.trial.enabled && userId !== undefined && !owner) {
-    kb.text(`🎁 Попробовать бесплатно (${s.trial.days} дн.)`).row();
+    kb.text(`🎁 Попробовать бесплатно (${humanHours(s.trial.hours)})`).row();
   }
   if (getSettings().referral.enabled) kb.text('🤝 Пригласить друга').row();
   // Показываем, только если владелец завёл хоть один код: иначе кнопка обещает
@@ -350,13 +352,13 @@ async function giveTrial(ctx: any): Promise<void> {
   if (!peer) return;
   markTrialUsed(userId);
   recordEvent({ type: 'free', userId });
-  addSubscription([{ loc: peer.loc, pubkey: peer.pubkey }], s.trial.days, {
+  addSubscriptionHours([{ loc: peer.loc, pubkey: peer.pubkey }], s.trial.hours, {
     userId,
     username: ctx.from?.username,
     stars: 0,
   });
   await offerConfig(ctx.api, ctx.chat!.id, peer.config, peer.locTitle, peer.protocol);
-  await ctx.reply(`🎁 Пробный доступ на ${s.trial.days} дн. активен. Приложение — кнопка ниже, вместе с ключом.`);
+  await ctx.reply(`🎁 Пробный доступ на ${humanHours(s.trial.hours)} активен. Приложение — кнопка ниже, вместе с ключом.`);
 }
 
 bot.callbackQuery('trial', async (ctx) => {
@@ -394,7 +396,7 @@ function adminText(note?: string): string {
   return (
     '⚙️ Настройки твоего бота\n\n' +
     `Тарифов: ${s.packages.length}\n` +
-    `Пробный период: ${s.trial.enabled ? `включён, ${s.trial.days} дн.` : 'выключен'}\n` +
+    `Пробный период: ${s.trial.enabled ? `включён, ${humanHours(s.trial.hours)}` : 'выключен'}\n` +
     `Приветствие: ${s.welcome.text ? 'своё' : 'стандартное'}${s.welcome.photo ? ' + фото' : ''}\n` +
     `Версия бота: ${currentVersion()}` +
     (note ? `\n\n${note}` : '')
@@ -486,12 +488,12 @@ bot.callbackQuery('trialcfg', async (ctx) => {
   const s = getSettings();
   const kb = new InlineKeyboard()
     .text(s.trial.enabled ? '🔴 Выключить' : '🟢 Включить', 'trialtoggle')
-    .text('📅 Сколько дней', 'trialdays')
+    .text('⏱ Сколько часов', 'trialhours')
     .row()
     .text('← Назад', 'admin');
   await ctx
     .editMessageText(
-      `🎁 Пробный период\n\nСейчас: ${s.trial.enabled ? `включён, ${s.trial.days} дн.` : 'выключен'}\n` +
+      `🎁 Пробный период\n\nСейчас: ${s.trial.enabled ? `включён, ${humanHours(s.trial.hours)}` : 'выключен'}\n` +
         `Выдан: ${trialCount()} раз(а). Один человек — один раз.`,
       { reply_markup: kb },
     )
@@ -629,12 +631,17 @@ bot.callbackQuery('trialtoggle', async (ctx) => {
   await showAdmin(ctx, s.trial.enabled ? '🟢 Пробный период включён.' : '🔴 Пробный период выключен.');
 });
 
-bot.callbackQuery('trialdays', async (ctx) => {
+// Спрашиваем в часах, а не в днях: срок бывает короче суток («дам на 6 часов
+// посмотреть»), и владельцу проще написать одно число, чем выбирать единицу.
+bot.callbackQuery('trialhours', async (ctx) => {
   await ctx.answerCallbackQuery();
   if (!isOwner(ctx.from?.id)) return;
-  await ctx.reply(`Сколько дней давать бесплатно? Сейчас: ${getSettings().trial.days}`, {
-    reply_markup: ask('trial-days'),
-  });
+  await ctx.reply(
+    `Сколько часов давать бесплатно? Напиши число: 24 — сутки, 72 — трое суток, 6 — шесть часов.
+` +
+      `Сейчас: ${humanHours(getSettings().trial.hours)}`,
+    { reply_markup: ask('trial-hours') },
+  );
 });
 
 bot.callbackQuery('wtext', async (ctx) => {
@@ -670,7 +677,7 @@ bot.callbackQuery('clients', async (ctx) => {
           .slice(0, 40)
           .map(
             (r) =>
-              `• ${r.who} — осталось ${r.daysLeft} дн.${r.stars ? ` · ${r.stars} ⭐` : ' · пробный'}` +
+              `• ${r.who} — осталось ${r.hoursLeft < 24 ? `${r.hoursLeft} ч.` : `${r.daysLeft} дн.`}${r.stars ? ` · ${r.stars} ⭐` : ' · пробный'}` +
               (r.locations > 1 ? ` · ${r.locations} локации` : ''),
           )
           .join('\n');
@@ -1173,7 +1180,18 @@ bot.on('message:text', async (ctx) => {
     return;
   }
 
-  if (kind === 'pkg-days' || kind === 'trial-days' || kind === 'pkg-new-days') {
+  if (kind === 'trial-hours') {
+    if (!isValidHours(n)) {
+      await ctx.reply(`❌ Нужно целое число часов от 1 до ${LIMITS.MAX_DAYS * 24}. Например 24 — это сутки.`);
+      return;
+    }
+    updateSettings((cur) => ({ ...cur, trial: { ...cur.trial, hours: n } }));
+    pending = null;
+    await ctx.reply(`✅ Пробный период: ${humanHours(n)}${n % 24 === 0 ? '' : ` (${n} ч.)`}`);
+    return;
+  }
+
+  if (kind === 'pkg-days' || kind === 'pkg-new-days') {
     if (!isValidDays(n)) {
       await ctx.reply(`❌ Нужно целое число дней от 1 до ${LIMITS.MAX_DAYS}.`);
       return;
@@ -1185,10 +1203,6 @@ bot.on('message:text', async (ctx) => {
       }));
       pending = null;
       await ctx.reply(`✅ Срок обновлён: ${n} дн.`);
-    } else if (kind === 'trial-days') {
-      updateSettings((cur) => ({ ...cur, trial: { ...cur.trial, days: n } }));
-      pending = null;
-      await ctx.reply(`✅ Пробный период: ${n} дн.`);
     } else {
       await ctx.reply(`Теперь пришли цену в звёздах за ${n} дн.:`, { reply_markup: ask('pkg-new-stars', String(n)) });
     }
@@ -1297,7 +1311,14 @@ async function sweepReminders(): Promise<void> {
   const s = getSettings();
   if (!s.reminder.enabled) return;
   for (const r of pendingReminders(s.reminder.days)) {
-    const when = r.daysLeft <= 0 ? 'сегодня' : r.daysLeft === 1 ? 'завтра' : `через ${r.daysLeft} дн.`;
+    const when =
+      r.hoursLeft < 24
+        ? r.hoursLeft <= 1
+          ? 'меньше чем через час'
+          : `через ${r.hoursLeft} ч.`
+        : r.daysLeft === 1
+          ? 'завтра'
+          : `через ${r.daysLeft} дн.`;
     const kb = new InlineKeyboard();
     for (const p of getSettings().packages) kb.text(packageLabel(p), `buy:${p.id}`).row();
     try {

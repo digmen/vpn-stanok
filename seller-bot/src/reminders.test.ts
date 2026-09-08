@@ -71,3 +71,18 @@ test('продлил подписку — новый срок, напомина�
   const later = NOW + 30 * DAY;
   assert.equal(pendingReminders(2, later).length, 1);
 });
+
+// Пробный период может быть короче окна напоминаний целиком — тогда напоминание
+// улетало бы в ту же минуту, что и сам ключ. Половина срока — граница.
+test('короткий пробный: не напоминаем сразу после выдачи', () => {
+  resetSent();
+  const HOUR = 3_600_000;
+  const sub = { peers: [{ loc: 'local', pubkey: 'k1' }], userId: 111, boughtAt: NOW, expiresAt: NOW + 24 * HOUR };
+  writeSubs([sub]);
+  assert.equal(pendingReminders(2, NOW + HOUR).length, 0, 'через час после выдачи писать рано');
+
+  const late = pendingReminders(2, NOW + 20 * HOUR);
+  assert.equal(late.length, 1, 'когда срок на исходе — напоминаем');
+  assert.equal(late[0].hoursLeft, 4);
+  assert.equal(late[0].daysLeft, 0);
+});

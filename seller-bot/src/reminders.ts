@@ -46,11 +46,17 @@ export interface PendingReminder {
   expiresAt: number;
   /** Сколько полных дней осталось — для текста сообщения. 0 = истекает сегодня. */
   daysLeft: number;
+  /** И то же в часах: пробный период бывает короче суток, и «сегодня» там слишком грубо. */
+  hoursLeft: number;
 }
 
 /**
  * Кому пора напомнить прямо сейчас: подписка ещё действует, до конца осталось не больше
  * `daysBefore` дней, и этому человеку по этому сроку мы ещё не писали.
+ *
+ * Короткие сроки (пробный на сутки и меньше) окно напоминания накрывает целиком, и
+ * человек получил бы «заканчивается сегодня» в ту же минуту, что и сам ключ. Поэтому
+ * напоминаем не раньше, чем прошла половина срока.
  *
  * Подписки без userId пропускаем молча — это записи первого поколения (см. normalizeSub),
  * покупателя в них попросту нет, писать некому.
@@ -62,6 +68,7 @@ export function pendingReminders(daysBefore: number, now = Date.now()): PendingR
   for (const s of allSubs()) {
     if (s.userId === undefined) continue;
     if (s.expiresAt <= now || s.expiresAt > horizon) continue;
+    if (s.boughtAt !== undefined && now < s.boughtAt + (s.expiresAt - s.boughtAt) / 2) continue;
     const key = keyOf(s.userId, s.expiresAt);
     if (state[key] !== undefined) continue;
     out.push({
@@ -69,6 +76,7 @@ export function pendingReminders(daysBefore: number, now = Date.now()): PendingR
       userId: s.userId,
       expiresAt: s.expiresAt,
       daysLeft: Math.floor((s.expiresAt - now) / DAY_MS),
+      hoursLeft: Math.max(0, Math.floor((s.expiresAt - now) / 3_600_000)),
     });
   }
   return out;

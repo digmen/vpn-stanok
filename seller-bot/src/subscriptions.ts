@@ -15,6 +15,7 @@ import { PRIMARY_LOCATION_ID } from './locations.js';
 // а на диск пишется уже только v3. Файл конвертируется сам при первой записи.
 const FILE = path.join(config.dataDir, 'subs.json');
 const DAY_MS = 86_400_000;
+const HOUR_MS = 3_600_000;
 
 /** Один выданный ключ: на какой локации он живёт и его публичный ключ. */
 export interface SubPeer {
@@ -28,6 +29,9 @@ export interface Sub {
   userId?: number;
   username?: string;
   days?: number;
+  /** Срок в часах — пишется всегда с 09.09, когда пробный период стал почасовым.
+   *  `days` рядом оставлен ради старых записей и экранов, считающих дни. */
+  hours?: number;
   stars?: number;
   boughtAt?: number;
 }
@@ -40,6 +44,7 @@ interface RawSub {
   userId?: unknown;
   username?: unknown;
   days?: unknown;
+  hours?: unknown;
   stars?: unknown;
   boughtAt?: unknown;
 }
@@ -75,6 +80,7 @@ export function normalizeSub(raw: RawSub): Sub | null {
   if (typeof raw.userId === 'number') sub.userId = raw.userId;
   if (typeof raw.username === 'string') sub.username = raw.username;
   if (typeof raw.days === 'number') sub.days = raw.days;
+  if (typeof raw.hours === 'number') sub.hours = raw.hours;
   if (typeof raw.stars === 'number') sub.stars = raw.stars;
   if (typeof raw.boughtAt === 'number') sub.boughtAt = raw.boughtAt;
   return sub;
@@ -104,12 +110,27 @@ export function addSubscription(
   days: number,
   buyer?: { userId?: number; username?: string; stars?: number },
 ): void {
+  addSubscriptionHours(peers, days * 24, buyer);
+}
+
+/**
+ * То же самое, но срок в часах. Отдельная дверь нужна пробному периоду: он бывает
+ * короче суток, а `days` — целое число, и 12 часов через него не выразить.
+ * `days` в записи проставляем только когда срок кратен суткам, чтобы старые экраны
+ * не показывали «0 дн.» вместо честных часов.
+ */
+export function addSubscriptionHours(
+  peers: SubPeer[],
+  hours: number,
+  buyer?: { userId?: number; username?: string; stars?: number },
+): void {
   if (peers.length === 0) return;
   const subs = read();
   subs.push({
     peers,
-    expiresAt: Date.now() + days * DAY_MS,
-    days,
+    expiresAt: Date.now() + hours * HOUR_MS,
+    hours,
+    ...(hours % 24 === 0 ? { days: hours / 24 } : {}),
     boughtAt: Date.now(),
     ...(buyer?.userId !== undefined ? { userId: buyer.userId } : {}),
     ...(buyer?.username ? { username: buyer.username } : {}),
@@ -192,6 +213,8 @@ export function allSubs(): Sub[] {
 export interface ClientRow {
   who: string;
   daysLeft: number;
+  /** Сколько осталось в часах — для пробных подписок короче суток, где «1 дн.» врёт. */
+  hoursLeft: number;
   days?: number;
   stars?: number;
   locations: number;
@@ -205,6 +228,7 @@ export function activeClients(now = Date.now()): ClientRow[] {
     .map((s) => ({
       who: s.username ? '@' + s.username : s.userId ? String(s.userId) : 'клиент до обновления',
       daysLeft: Math.max(0, Math.ceil((s.expiresAt - now) / DAY_MS)),
+      hoursLeft: Math.max(0, Math.ceil((s.expiresAt - now) / HOUR_MS)),
       days: s.days,
       stars: s.stars,
       locations: s.peers.length,

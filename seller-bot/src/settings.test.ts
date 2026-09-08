@@ -10,7 +10,7 @@ import path from 'node:path';
 process.env.SELLER_BOT_TOKEN ??= '1:test';
 process.env.DATA_DIR ??= fs.mkdtempSync(path.join(os.tmpdir(), 'seller-test-'));
 
-const { defaultPackages, isValidDays, isValidStars, normalize, packageLabel } = await import('./settings.js');
+const { defaultPackages, humanHours, isValidDays, isValidHours, isValidStars, normalize, packageLabel } = await import('./settings.js');
 const { isNewer } = await import('./update.js');
 
 // Тесты без зависимостей: `npm test` = tsx --test. Проверяем то, на чём легко потерять
@@ -33,10 +33,27 @@ test('битые настройки не роняют бота и не обну�
   assert.equal(normalize({ packages: [] }).packages.length, 3);
   assert.equal(normalize({ packages: [{ id: 'x', days: 0, stars: 5 }] }).packages.length, 3);
 
-  const ok = normalize({ packages: [{ id: 'a', days: 7, stars: 25 }], trial: { enabled: true, days: 5 } });
+  const ok = normalize({ packages: [{ id: 'a', days: 7, stars: 25 }], trial: { enabled: true, hours: 6 } });
   assert.equal(ok.packages.length, 1);
   assert.equal(ok.trial.enabled, true);
-  assert.equal(ok.trial.days, 5);
+  assert.equal(ok.trial.hours, 6);
+});
+
+test('пробный период из старых настроек переезжает из дней в часы', () => {
+  // Настройки, записанные до 09.09: срок лежит в днях, поля hours нет.
+  assert.equal(normalize({ trial: { enabled: true, days: 5 } }).trial.hours, 120);
+  // Часы главнее, если есть оба поля — дни там просто хвост от прошлой версии.
+  assert.equal(normalize({ trial: { enabled: true, days: 5, hours: 12 } }).trial.hours, 12);
+  // Мусор — умолчание, а не ноль: пробный на 0 часов выдавал бы мёртвый ключ.
+  assert.equal(normalize({ trial: { enabled: true, days: 0 } }).trial.hours, 72);
+});
+
+test('срок пробного читается человеком', () => {
+  assert.equal(humanHours(24), 'сутки');
+  assert.equal(humanHours(72), '3 дн.');
+  assert.equal(humanHours(6), '6 ч.');
+  assert.ok(isValidHours(1) && isValidHours(24) && isValidHours(3650 * 24));
+  assert.ok(!isValidHours(0) && !isValidHours(1.5) && !isValidHours(3650 * 24 + 1));
 });
 
 test('приветствие обрезается, мусорные типы отбрасываются', () => {
