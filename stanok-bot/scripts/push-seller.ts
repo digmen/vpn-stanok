@@ -12,6 +12,7 @@
  * Данные узла (цены, подписки, клиенты) лежат в /root/seller-bot-data и не трогаются.
  */
 import { decrypt } from '../src/crypto.js';
+import { nodeDomain } from '../src/dns.js';
 import { getReadyNodes, type NodeRow } from '../src/db.js';
 import { deploySeller } from '../src/deploy-seller.js';
 import { checkSshPort } from '../src/preflight.js';
@@ -32,6 +33,7 @@ async function pushOne(n: NodeRow): Promise<{ ok: boolean; why?: string }> {
       stanokUrl: config.stanokUrl,
       priceStars: config.sellerPriceStars,
       protocol: n.protocol,
+      domain: nodeDomain(n.id),
     });
     return { ok: true };
   } catch (e) {

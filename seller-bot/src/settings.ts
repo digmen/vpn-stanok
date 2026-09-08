@@ -30,6 +30,15 @@ export interface Settings {
    *  умолчанию: до 08.09 бот молча отзывал ключ в момент истечения, и человек узнавал
    *  об окончании тем, что интернет перестал работать. */
   reminder: { enabled: boolean; days: number };
+  /** Оплата картой/СБП через Tribute — подключает сам владелец в своём боте (см. tribute.ts).
+   *  Ключ хранится здесь же, в данных узла: это его ключ от его же кассы, нам он не нужен
+   *  и через нас не проходит. `products` заполняет бот сам, забирая товары из API Tribute —
+   *  владелец только выбирает, какой товар какому тарифу соответствует. */
+  tribute: {
+    enabled: boolean;
+    apiKey: string | null;
+    products: { pkgId: string; productId: string; url: string; label: string }[];
+  };
   welcome: { text: string | null; photo: string | null };
 }
 
@@ -100,6 +109,7 @@ function fresh(): Settings {
     trial: { enabled: false, hours: 72 },
     referral: { enabled: false, percent: 30 },
     reminder: { enabled: true, days: 2 },
+    tribute: { enabled: false, apiKey: null, products: [] },
     welcome: { text: null, photo: null },
   };
 }
@@ -144,6 +154,22 @@ export function normalize(raw: unknown): Settings {
     reminder: {
       enabled: r.reminder?.enabled === undefined ? base.reminder.enabled : Boolean(r.reminder.enabled),
       days: REMINDER_DAYS.includes(Number(r.reminder?.days)) ? Number(r.reminder!.days) : base.reminder.days,
+    },
+    // Оплата картой считается включённой, только когда есть и ключ, и хоть один
+    // привязанный товар: без этого кнопка «Картой» была бы у клиента, а платить — некуда.
+    tribute: {
+      enabled: Boolean(r.tribute?.enabled),
+      apiKey: typeof r.tribute?.apiKey === 'string' && r.tribute.apiKey ? r.tribute.apiKey : null,
+      products: Array.isArray(r.tribute?.products)
+        ? r.tribute.products
+            .filter((x) => x && typeof x.pkgId === 'string' && typeof x.productId === 'string' && typeof x.url === 'string')
+            .map((x) => ({
+              pkgId: String(x.pkgId),
+              productId: String(x.productId),
+              url: String(x.url),
+              label: typeof x.label === 'string' ? x.label : '',
+            }))
+        : [],
     },
     welcome: {
       text: typeof r.welcome?.text === 'string' ? r.welcome.text.slice(0, LIMITS.MAX_WELCOME_LEN) : null,
@@ -195,4 +221,22 @@ export function packageLabel(p: Package): string {
   const d = p.days;
   const word = d % 10 === 1 && d % 100 !== 11 ? 'день' : d % 10 >= 2 && d % 10 <= 4 && (d % 100 < 10 || d % 100 >= 20) ? 'дня' : 'дней';
   return `${d} ${word} — ${p.stars} ⭐`;
+}
+
+/** Ссылка на оплату картой для тарифа — если владелец её привязал. */
+export function tributeUrlFor(pkgId: string): { url: string; label: string } | undefined {
+  const s = getSettings().tribute;
+  if (!s.enabled || s.apiKey === null) return undefined;
+  const e = s.products.find((x) => x.pkgId === pkgId);
+  return e ? { url: e.url, label: e.label } : undefined;
+}
+
+/** Обратный поиск тарифа по товару из вебхука.
+ *
+ *  Сравнение через String намеренно: у нас id хранится текстом, а в JSON вебхука тот же
+ *  id приезжал числом — строгое равенство давало ложь, человек платил, а ключ не выдавался.
+ *  Ровно этот баг ловили 08.09 в первом варианте оплаты картой. */
+export function packageForTributeProduct(productId: string | number): string | undefined {
+  const key = String(productId);
+  return getSettings().tribute.products.find((x) => String(x.productId) === key)?.pkgId;
 }

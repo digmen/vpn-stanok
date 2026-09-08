@@ -18,6 +18,10 @@ export interface DeployOpts {
    *  из .env, чтобы знать, каким add/revoke-скриптом обслуживать локацию 'local'
    *  (см. seller-bot/src/config.ts::primaryProtocol, locations.ts::allLocations). */
   protocol: NodeProtocol;
+  /** Доменное имя узла (nodeN.<зона>), если оно у него есть. Нужно оплате картой: вебхук
+   *  Tribute приходит по HTTPS на настоящее имя с сертификатом — по голому IP его не принять.
+   *  Узлам без домена просто не будет доступна кнопка «Оплата картой», остальное как было. */
+  domain?: string | null;
 }
 
 // Разворачивает бота-продавца на сервере узла: Node + pm2 + код + npm install + .env + запуск.
@@ -79,6 +83,7 @@ export async function deploySeller(opts: DeployOpts): Promise<void> {
       `PRICE_STARS=${opts.priceStars}`,
       `DATA_DIR=${REMOTE.SELLER_DATA_DIR}`,
       `PRIMARY_PROTOCOL=${opts.protocol}`,
+      ...(opts.domain ? [`NODE_DOMAIN=${opts.domain}`] : []),
     ].join('\n');
     const writeEnv = await ssh.execCommand(`cat > ${remoteDir}/.env <<'ENVEOF'\n${env}\nENVEOF`);
     if (writeEnv.code !== 0) throw new Error('не удалось записать .env');

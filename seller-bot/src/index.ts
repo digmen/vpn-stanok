@@ -47,8 +47,20 @@ import { buildStats, recordEvent } from './stats.js';
 import { hasUsedTrial, markTrialUsed, trialCount } from './trials.js';
 import { checkUpdate, currentVersion, startSelfUpdate } from './update.js';
 import {
+  eventKind,
+  fetchTributeProducts,
+  priceLabel,
+  syncTributeServer,
+  watchTributeCert,
+  webhookUrl,
+  type TributeProduct,
+  type TributeWebhookEvent,
+} from './tribute.js';
+import {
   findPackage,
   getSettings,
+  packageForTributeProduct,
+  tributeUrlFor,
   humanHours,
   isValidDays,
   isValidHours,
@@ -78,7 +90,7 @@ function appLinksText(): string {
 // перезапуск специально: зависшее ожидание не должно жевать чужие сообщения.
 type PendingKind =
   | 'pkg-price' | 'pkg-days' | 'pkg-new-days' | 'pkg-new-stars'
-  | 'welcome-text' | 'welcome-photo' | 'trial-hours' | 'ref-percent' | 'promo-add'
+  | 'welcome-text' | 'welcome-photo' | 'trial-hours' | 'ref-percent' | 'promo-add' | 'tribute-key'
   // Добавление локации: сначала адрес, потом пароль, потом название
   | 'loc-host' | 'loc-password' | 'loc-title' | 'loc-rename' | 'loc-editip';
 let pending: { kind: PendingKind; arg?: string; at: number } | null = null;
@@ -248,6 +260,15 @@ async function sendInvoice(
     'XTR', // Telegram Stars
     [{ label: `VPN ${pkg.days} дн.`, amount: stars }],
   );
+  // Оплата картой идёт отдельным сообщением, а не кнопкой на счёте: к счёту Telegram
+  // чужие кнопки не приделать. Со скидкой карту не показываем намеренно — цена в Tribute
+  // фиксированная, промокод там не сработает, и кнопка обещала бы то, чего не будет.
+  const card = promo ? undefined : tributeUrlFor(pkg.id);
+  if (card) {
+    await ctx.reply(`💳 Или картой${card.label ? ` — ${card.label}` : ''}. Ключ придёт сюда же, автоматически.`, {
+      reply_markup: new InlineKeyboard().url('💳 Оплатить картой', card.url),
+    });
+  }
 }
 
 // inline-кнопка покупки остаётся для совместимости (старые сообщения в чатах);
@@ -276,34 +297,65 @@ bot.on('pre_checkout_query', async (ctx) => {
   await ctx.answerPreCheckoutQuery(true);
 });
 
+/**
+ * Выдача купленного: одна дверь для всех способов оплаты. Звёзды Telegram и карта через
+ * Tribute отличаются ровно тем, ЧЕМ заплатили; всё, что происходит после — пиры на всех
+ * локациях, запись подписки, бонусные дни, промокод, благодарность пригласившему —
+ * обязано быть одинаковым. Разъедутся два пути выдачи — разъедутся и баги в них.
+ *
+ * chatId равен userId: платящий пишет боту в личку, других чатов у продажи не бывает.
+ */
+async function deliverPurchase(opts: {
+  userId: number;
+  username?: string;
+  pkg?: ReturnType<typeof findPackage>;
+  /** Сколько звёзд заплачено; для карты 0 — сумма живёт в Tribute, а не у нас. */
+  stars: number;
+  promoCode?: string;
+  /** Идентификатор платежа — реферальной программе, чтобы не начислить дважды. */
+  charge: string;
+  /** Чем заплачено, для сообщения владельцу и лога. */
+  method: 'stars' | 'card';
+}): Promise<boolean> {
+  const { userId, pkg } = opts;
+  // Копилка реферальных дней применяется ИМЕННО ЗДЕСЬ, при первой же покупке: выдавать
+  // пиры тому, кто сам ничего не покупал, значит раздавать бесплатный VPN за приглашения.
+  const bonusDays = takeBanked(userId);
+  const days = (pkg?.days ?? config.days) + bonusDays;
+  recordEvent({ type: 'paid', stars: opts.stars, userId });
+  // Платный тариф даёт доступ ко ВСЕМ локациям — ровно то, о чём просил франчайзи:
+  // «покупает на месяц, а ему доступен Лондон, Финляндия».
+  const peers = await generateEverywhere(bot.api, userId);
+  if (peers.length === 0) return false;
+  addSubscription(
+    peers.map((p) => ({ loc: p.loc, pubkey: p.pubkey })),
+    days,
+    { userId, username: opts.username, stars: opts.stars },
+  );
+  await offerConfigs(bot.api, userId, peers.map((p) => ({ config: p.config, title: p.locTitle, protocol: p.protocol })));
+  if (bonusDays > 0) {
+    await bot.api.sendMessage(userId, `🤝 К сроку добавлено ${bonusDays} дн. за приглашённых друзей.`).catch(() => {});
+  }
+  // Списываем промокод ТОЛЬКО после успешной оплаты: списание при вводе позволяло бы
+  // любому желающему сжечь лимит чужого кода, ничего не заплатив.
+  if (opts.promoCode) markPromoUsed(opts.promoCode, userId);
+  void awardReferral(bot.api, userId, pkg?.days ?? config.days, opts.charge);
+  return true;
+}
+
 bot.on('message:successful_payment', async (ctx) => {
   const pay = ctx.message.successful_payment;
   // payload: `pkg:<id>` (старый формат) либо `pkg:<id>:<ПРОМОКОД>`.
   const [payloadPkg, payloadPromo] = pay.invoice_payload.replace(/^pkg:/, '').split(':');
-  const pkg = findPackage(payloadPkg);
-  // Копилка реферальных дней применяется ИМЕННО ЗДЕСЬ, при первой же покупке:
-  // выдавать пиры тому, кто сам ничего не покупал, значит раздавать бесплатный VPN
-  // за приглашения. Пока покупки нет — дни просто лежат (см. referrals.ts::bankDays).
-  const bonusDays = takeBanked(ctx.from.id);
-  const days = (pkg?.days ?? config.days) + bonusDays;
-  recordEvent({ type: 'paid', stars: pay.total_amount, userId: ctx.from.id });
-  // Платный тариф даёт доступ ко ВСЕМ локациям — ровно то, о чём просил
-  // франчайзи: «покупает на месяц, а ему доступен Лондон, Финляндия».
-  const peers = await generateEverywhere(ctx.api, ctx.chat.id);
-  if (peers.length === 0) return;
-  addSubscription(
-    peers.map((p) => ({ loc: p.loc, pubkey: p.pubkey })),
-    days,
-    { userId: ctx.from.id, username: ctx.from.username, stars: pay.total_amount },
-  );
-  await offerConfigs(ctx.api, ctx.chat.id, peers.map((p) => ({ config: p.config, title: p.locTitle, protocol: p.protocol })));
-  if (bonusDays > 0) {
-    await ctx.reply(`🤝 К сроку добавлено ${bonusDays} дн. за приглашённых друзей.`).catch(() => {});
-  }
-  // Списываем промокод ТОЛЬКО здесь, после успешной оплаты: списание при вводе
-  // позволяло бы любому желающему сжечь лимит чужого кода, ничего не заплатив.
-  if (payloadPromo) markPromoUsed(payloadPromo, ctx.from.id);
-  void awardReferral(ctx.api, ctx.from.id, pkg?.days ?? config.days, pay.telegram_payment_charge_id);
+  await deliverPurchase({
+    userId: ctx.from.id,
+    username: ctx.from.username,
+    pkg: findPackage(payloadPkg),
+    stars: pay.total_amount,
+    promoCode: payloadPromo,
+    charge: pay.telegram_payment_charge_id,
+    method: 'stars',
+  });
 });
 
 /**
@@ -376,6 +428,7 @@ function adminMenu(): InlineKeyboard {
     .text('🤝 Рефералы', 'refcfg')
     .row()
     .text('🎟 Промокоды', 'promocfg')
+    .text('💳 Оплата картой', 'cardcfg')
     .row()
     .text('✍️ Приветствие', 'wtext')
     .text('🖼 Фото', 'wphoto')
@@ -989,6 +1042,35 @@ bot.on('message:text', async (ctx) => {
   const n = Number(text);
   const { kind, arg } = pending;
 
+  if (kind === 'tribute-key') {
+    pending = null;
+    // Удаляем сообщение с ключом сразу: чат владельца с ботом — не хранилище секретов,
+    // а ключ Tribute даёт доступ к его кассе. Не вышло удалить (нет прав, старое) — так
+    // и скажем, чтобы он убрал сам, а не думал, что всё чисто.
+    const wiped = await ctx.deleteMessage().then(() => true).catch(() => false);
+    let rows: TributeProduct[];
+    try {
+      rows = await fetchTributeProducts(text);
+    } catch (e) {
+      // Ключ не сохраняем, пока он не доказал работоспособность: сохранённый нерабочий
+      // ключ выглядит как «подключено», а оплата при этом не придёт вообще.
+      await ctx.reply(`❌ Ключ не принят: ${e instanceof Error ? e.message : e}. Проверь и пришли снова.`);
+      return;
+    }
+    updateSettings((cur) => ({ ...cur, tribute: { ...cur.tribute, apiKey: text } }));
+    productCache = { at: Date.now(), rows };
+    syncTributeServer();
+    const url = webhookUrl();
+    await ctx.reply(
+      `✅ Ключ принят, товаров в Tribute: ${rows.length}.` +
+        (wiped ? '' : ' Сообщение с ключом удали сам — у меня не хватило прав.') +
+        (url ? `\n\nТеперь вставь этот адрес в кабинете Tribute (Настройки → API-ключи):\n<code>${url}</code>` : '') +
+        `\n\nДальше: «⚙️ Мой бот» → «💳 Оплата картой» → «Привязать тарифы».`,
+      { parse_mode: 'HTML' },
+    );
+    return;
+  }
+
   if (kind === 'welcome-text') {
     pending = null;
     const reset = text.toLowerCase() === 'сброс';
@@ -1339,6 +1421,237 @@ async function sweepReminders(): Promise<void> {
 }
 setInterval(() => void sweepReminders(), 60 * 60 * 1000);
 void sweepReminders();
+
+
+// ── оплата картой: подключает сам владелец ────────────────────────────────
+// Всё, что нужно от него, — ключ из кабинета Tribute. Идентификаторы товаров бот
+// достаёт по этому же ключу сам: в прошлый раз их вбивали руками, перепутали числовой id
+// со ссылочным, и кнопка оплаты вела в никуда. Чего человек не вводит, то он не перепутает.
+let productCache: { at: number; rows: TributeProduct[] } | null = null;
+
+async function tributeProducts(force = false): Promise<TributeProduct[]> {
+  const key = getSettings().tribute.apiKey;
+  if (!key) return [];
+  if (!force && productCache && Date.now() - productCache.at < 5 * 60 * 1000) return productCache.rows;
+  const rows = await fetchTributeProducts(key);
+  productCache = { at: Date.now(), rows };
+  return rows;
+}
+
+function cardText(note?: string): string {
+  const t = getSettings().tribute;
+  const url = webhookUrl();
+  const bound = t.products.length;
+  const total = getSettings().packages.length;
+  const lines = [
+    '💳 Оплата картой и СБП (через Tribute)',
+    '',
+    `Ключ: ${t.apiKey ? '✅ подключён' : '❌ не задан'}`,
+    `Тарифы с оплатой картой: ${bound} из ${total}`,
+    `Приём оплат: ${t.enabled && t.apiKey && bound > 0 ? '🟢 включён' : '🔴 выключен'}`,
+  ];
+  if (url) {
+    lines.push(
+      '',
+      'Адрес для кабинета Tribute (Настройки → API-ключи → webhook URL):',
+      `<code>${url}</code>`,
+      '',
+      'Без этого адреса Tribute не сообщит боту об оплате, и ключ клиенту не уйдёт.',
+    );
+  } else {
+    // Не молчим: у узла без домена и сертификата вебхуку физически некуда прийти.
+    lines.push('', '⚠️ На этом сервере нет домена с сертификатом — принять оплату картой он не сможет. Напиши в станок.');
+  }
+  if (note) lines.push('', note);
+  return lines.join('\n');
+}
+
+function cardMenu(): InlineKeyboard {
+  const t = getSettings().tribute;
+  const kb = new InlineKeyboard().text(t.apiKey ? '🔑 Заменить ключ' : '🔑 Ввести ключ Tribute', 'tribkey').row();
+  if (t.apiKey) {
+    kb.text('🔗 Привязать тарифы', 'tribbind').row();
+    if (t.products.length > 0) kb.text(t.enabled ? '🔴 Выключить' : '🟢 Включить', 'tribtoggle').row();
+  }
+  return kb.text('← Назад', 'admin');
+}
+
+async function showCard(ctx: any, note?: string): Promise<void> {
+  const text = cardText(note);
+  const opts = { reply_markup: cardMenu(), parse_mode: 'HTML' as const };
+  await ctx.editMessageText(text, opts).catch(async () => {
+    await ctx.reply(text, opts);
+  });
+}
+
+bot.callbackQuery('cardcfg', async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!isOwner(ctx.from?.id)) return;
+  await showCard(ctx);
+});
+
+bot.callbackQuery('tribkey', async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!isOwner(ctx.from?.id)) return;
+  await ctx.reply(
+    'Пришли API-ключ из Tribute: в их боте открой кабинет → «…» → Настройки → API-ключи.\n\n' +
+      'Сообщение с ключом я сразу удалю из чата — он не должен висеть в переписке.',
+    { reply_markup: ask('tribute-key') },
+  );
+});
+
+bot.callbackQuery('tribtoggle', async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!isOwner(ctx.from?.id)) return;
+  updateSettings((cur) => ({ ...cur, tribute: { ...cur.tribute, enabled: !cur.tribute.enabled } }));
+  syncTributeServer();
+  await showCard(ctx, getSettings().tribute.enabled ? '🟢 Приём оплат картой включён.' : '🔴 Приём оплат картой выключен.');
+});
+
+bot.callbackQuery('tribbind', async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!isOwner(ctx.from?.id)) return;
+  const s = getSettings();
+  const kb = new InlineKeyboard();
+  for (const p of s.packages) {
+    const bound = s.tribute.products.find((x) => x.pkgId === p.id);
+    kb.text(`${p.days} дн. — ${bound ? bound.label : 'не привязан'}`, `tribpkg:${p.id}`).row();
+  }
+  kb.text('← Назад', 'cardcfg');
+  await ctx
+    .editMessageText('Выбери тариф, чтобы указать, какой товар Tribute ему соответствует.', { reply_markup: kb })
+    .catch(() => {});
+});
+
+bot.callbackQuery(/^tribpkg:(.+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!isOwner(ctx.from?.id)) return;
+  const pkgId = ctx.match[1];
+  let rows: TributeProduct[];
+  try {
+    rows = await tributeProducts(true);
+  } catch (e) {
+    await showCard(ctx, `❌ Не смог получить товары из Tribute: ${e instanceof Error ? e.message : e}`);
+    return;
+  }
+  if (rows.length === 0) {
+    await showCard(ctx, '❌ В твоём Tribute нет ни одного товара — сначала создай их там, потом привязывай.');
+    return;
+  }
+  const kb = new InlineKeyboard();
+  for (const r of rows) kb.text(`${r.name} — ${priceLabel(r)}`, `tribset:${pkgId}:${r.id}`).row();
+  kb.text('🗑 Убрать привязку', `tribset:${pkgId}:-`).row().text('← Назад', 'tribbind');
+  await ctx.editMessageText('Какой товар Tribute соответствует этому тарифу?', { reply_markup: kb }).catch(() => {});
+});
+
+bot.callbackQuery(/^tribset:([^:]+):(.+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!isOwner(ctx.from?.id)) return;
+  const [, pkgId, productId] = ctx.match;
+  if (productId === '-') {
+    updateSettings((cur) => ({
+      ...cur,
+      tribute: { ...cur.tribute, products: cur.tribute.products.filter((x) => x.pkgId !== pkgId) },
+    }));
+    await showCard(ctx, '🗑 Привязка убрана — оплата картой у этого тарифа больше не предлагается.');
+    return;
+  }
+  const rows = await tributeProducts().catch(() => [] as TributeProduct[]);
+  const prod = rows.find((r) => r.id === productId);
+  if (!prod) {
+    await showCard(ctx, '❌ Такого товара в Tribute больше нет — обнови список и выбери заново.');
+    return;
+  }
+  updateSettings((cur) => ({
+    ...cur,
+    tribute: {
+      ...cur.tribute,
+      // Один тариф — один товар: старая привязка выбрасывается, иначе в карте копились бы
+      // два товара на один тариф, и по вебхуку было бы непонятно, за что заплатили.
+      products: [
+        ...cur.tribute.products.filter((x) => x.pkgId !== pkgId),
+        { pkgId, productId: prod.id, url: prod.webLink, label: priceLabel(prod) },
+      ],
+    },
+  }));
+  syncTributeServer();
+  await showCard(ctx, `✅ Тариф привязан к «${prod.name}» (${priceLabel(prod)}).`);
+});
+
+// ── оплата картой (Tribute) ───────────────────────────────────────────────
+/**
+ * Событие оплаты от Tribute. Выдаём тем же путём, что и за звёзды (deliverPurchase) —
+ * человек не должен получить меньше оттого, что заплатил картой.
+ *
+ * Всё, чего не понимаем, громко пишем в лог ВМЕСТЕ с сырым событием: прошлый раз
+ * (06.09, товар 150556) в логе осталось только «нет в карте», и по этой записи нельзя
+ * было понять, что именно пришло и почему не совпало.
+ */
+async function handleTributeEvent(ev: TributeWebhookEvent): Promise<void> {
+  const p = ev.payload ?? {};
+  const kind = eventKind(ev.name);
+  if (kind === 'other') return;
+
+  const buyer = p.telegram_user_id;
+  const productId = p.product_id;
+  if (buyer === undefined || productId === undefined) return;
+
+  const pkgId = packageForTributeProduct(productId);
+  const pkg = pkgId ? findPackage(pkgId) : undefined;
+  const ownerId = getOwnerId();
+
+  if (kind === 'refund') {
+    // Возврат не отбираем автоматически: подписка уже выдана, а решение «забрать доступ»
+    // за владельца принимать нельзя. Его дело — мы только обязаны не промолчать.
+    if (ownerId) {
+      await bot.api
+        .sendMessage(
+          ownerId,
+          `↩️ Tribute: возврат по товару ${productId}${pkg ? ` (тариф ${pkg.days} дн.)` : ''}, ` +
+            `клиент ${buyer}. Доступ у него остался — если нужно отозвать, сделай это вручную.`,
+        )
+        .catch(() => {});
+    }
+    return;
+  }
+
+  if (!pkg) {
+    console.error(
+      `Tribute: оплачен товар ${productId} (тип ${typeof productId}), не привязанный ни к одному тарифу. ` +
+        `Событие: ${JSON.stringify(ev).slice(0, 500)}`,
+    );
+    if (ownerId) {
+      await bot.api
+        .sendMessage(
+          ownerId,
+          `⚠️ Пришла оплата картой за товар, которого нет в привязке тарифов (${productId}).
+
+` +
+            `Клиент ${buyer} заплатил, но ключ не выдан. Открой «⚙️ Мой бот» → «💳 Оплата картой» ` +
+            'и привяжи товар к тарифу — потом выдай доступ вручную.',
+        )
+        .catch(() => {});
+    }
+    return;
+  }
+
+  const charge = `tribute:${p.purchase_id ?? `${p.subscription_id}:${p.period_id}`}`;
+  const ok = await deliverPurchase({ userId: buyer, pkg, stars: 0, charge, method: 'card' });
+  if (ownerId) {
+    const sum = typeof p.amount === 'number' ? ` на ${priceLabel({ amount: p.amount, currency: String(p.currency ?? '') })}` : '';
+    await bot.api
+      .sendMessage(
+        ownerId,
+        ok
+          ? `💳 Оплата картой${sum}: тариф ${pkg.days} дн., клиент ${buyer}. Ключ выдан.`
+          : `⚠️ Оплата картой${sum} пришла (клиент ${buyer}), но ключ выдать не удалось — серверы не ответили.`,
+      )
+      .catch(() => {});
+  }
+}
+
+syncTributeServer(handleTributeEvent);
+watchTributeCert();
 
 await bot.start({
   onStart: (info) => console.log(`Бот-продавец @${info.username} запущен, версия ${currentVersion()}`),

@@ -202,6 +202,8 @@ export async function provisionNode(
         stanokUrl: config.stanokUrl,
         priceStars: config.sellerPriceStars,
         protocol,
+        // Домен есть только у узлов на WS+TLS — им и будет доступна оплата картой.
+        domain,
       });
 
       setNodeStatus(nodeId, 'ready');
