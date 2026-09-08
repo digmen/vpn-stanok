@@ -1,7 +1,7 @@
 import { NodeSSH } from 'node-ssh';
 import { SSH } from './constants.js';
 import { decrypt } from './crypto.js';
-import { getReadyNodes, type NodeRow } from './db.js';
+import { getBroadcastNodes, type NodeRow } from './db.js';
 
 /**
  * Где владельцы спотыкаются, настраивая оплату картой.
@@ -134,8 +134,9 @@ async function readNode(n: NodeRow): Promise<NodeSetup> {
 }
 
 export async function collectSetup(): Promise<NodeSetup[]> {
-  const nodes = getReadyNodes().filter((n) => n.is_primary === 1);
-  return Promise.all(nodes.map(readNode));
+  // Ровно те же узлы, что и в рассылках: исключённые (no_broadcast) — это отдельные
+  // проекты со своим кодом, и «не начинал настройку» про них было бы неправдой.
+  return Promise.all(getBroadcastNodes().map(readNode));
 }
 
 function when(at: number): string {
