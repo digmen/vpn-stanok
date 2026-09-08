@@ -22,6 +22,7 @@ import { isValidBotToken } from './validate.js';
 import { decrypt } from './crypto.js';
 import { commission, revenueReport, syncNode } from './revenue.js';
 import { backupAllPrimaries } from './backup.js';
+import { broadcast, lastBroadcast, undoLast } from './broadcast.js';
 
 const bot = new Bot<MyContext>(config.botToken);
 
@@ -126,7 +127,10 @@ bot.command('status', async (ctx) => {
 });
 
 bot.command('help', async (ctx) => {
-  await ctx.reply('/start — начать\n/status — статус твоих серверов\n/token — заменить токен бота-продавца');
+  const base = '/start — начать\n/status — статус твоих серверов\n/token — заменить токен бота-продавца';
+  // Админские команды видит только админ — остальным они не нужны и только путают.
+  const admin = '\n\n/say <текст> — рассылка владельцам\n/undo — откатить последнюю рассылку';
+  await ctx.reply(config.adminIds.includes(ctx.from?.id ?? -1) ? base + admin : base);
 });
 
 // Смена токена бота-продавца без повторной настройки сервера (см. onboarding.ts::updateToken).
@@ -271,6 +275,50 @@ bot.on('message:text', async (ctx) => {
   if (text.startsWith('/')) return; // команды уже видны как отдельные шаги
   if (isValidBotToken(text)) return; // на всякий случай: токен в журнал не кладём никогда
   logEvent(ctx.from, 'chat_message', text.slice(0, 200));
+});
+
+// Рассылка владельцам узлов и откат последней рассылки.
+//
+// 🔴 08.09: заведено после того, как разосланное оповещение попросили удалить, а
+// идентификаторы сообщений нигде не сохранялись — пришлось искать их перебором номеров,
+// рискуя зацепить чужое сообщение. Теперь любая рассылка отменяется одной командой.
+//
+// В текст рассылки НЕ подставляем ничего от себя: ни номеров узлов, ни имён — уходит
+// ровно то, что написал владелец станка. Раньше я дописывал в конец служебную строку
+// с перечислением, кому ушло, и это лишнее в сообщении, которое человек может переслать.
+bot.command('say', async (ctx) => {
+  if (!config.adminIds.includes(ctx.from?.id ?? -1)) return;
+  const text = ctx.match?.trim();
+  if (!text) {
+    await ctx.reply('Напиши текст после команды:\n/say Привет! Появились промокоды и скидки.');
+    return;
+  }
+  const owners = [...new Set(getReadyPrimaryNodes().map((n) => n.tg_user_id))];
+  if (owners.length === 0) {
+    await ctx.reply('Некому рассылать — нет ни одного живого узла.');
+    return;
+  }
+  const { record, failed } = await broadcast(ctx.api, owners, text);
+  await ctx.reply(
+    `📢 Отправлено: ${record.sent.length} из ${owners.length}` +
+      (failed.length > 0 ? ` (не доставлено ${failed.length})` : '') +
+      '\n\nЕсли передумал — /undo, удалю у всех.',
+  );
+});
+
+bot.command('undo', async (ctx) => {
+  if (!config.adminIds.includes(ctx.from?.id ?? -1)) return;
+  const last = lastBroadcast();
+  if (!last) {
+    await ctx.reply('Откатывать нечего — рассылок не было.');
+    return;
+  }
+  const res = await undoLast(ctx.api);
+  if (!res) return;
+  await ctx.reply(
+    `↩️ Откат «${res.preview}»\nУдалено: ${res.ok}` +
+      (res.failed > 0 ? `, не вышло: ${res.failed} (старше 48 часов или уже удалено)` : ''),
+  );
 });
 
 bot.catch((err) => {
