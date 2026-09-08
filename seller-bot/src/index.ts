@@ -3,6 +3,17 @@ import { config } from './config.js';
 import { promoEnabled } from './branding.js';
 import { markReminded, pendingReminders } from './reminders.js';
 import {
+  addPromo,
+  allPromos,
+  checkPromo,
+  discountedStars,
+  isValidCode,
+  isValidPromoPercent,
+  markPromoUsed,
+  PROMO_LIMITS,
+  removePromo,
+} from './promos.js';
+import {
   bankDays,
   bindReferral,
   inviteLink,
@@ -65,11 +76,17 @@ function appLinksText(): string {
 // перезапуск специально: зависшее ожидание не должно жевать чужие сообщения.
 type PendingKind =
   | 'pkg-price' | 'pkg-days' | 'pkg-new-days' | 'pkg-new-stars'
-  | 'welcome-text' | 'welcome-photo' | 'trial-days' | 'ref-percent'
+  | 'welcome-text' | 'welcome-photo' | 'trial-days' | 'ref-percent' | 'promo-add'
   // Добавление локации: сначала адрес, потом пароль, потом название
   | 'loc-host' | 'loc-password' | 'loc-title' | 'loc-rename' | 'loc-editip';
 let pending: { kind: PendingKind; arg?: string; at: number } | null = null;
 const PROMPT_TTL_MS = 180_000;
+
+// Ожидание промокода от КЛИЕНТА. Отдельно от `pending`: тот один на весь бот и
+// принадлежит владельцу — если пустить туда клиентов, двое одновременно затрут
+// ввод друг друга. Здесь ключ на человека, и состояние живёт только в памяти:
+// потерять его при перезапуске не страшно, человек просто нажмёт кнопку заново.
+const awaitingPromo = new Map<number, number>();
 
 const isOwner = (id?: number): boolean => id !== undefined && id === getOwnerId();
 const expired = (): boolean => pending !== null && Date.now() - pending.at > PROMPT_TTL_MS;
@@ -127,6 +144,9 @@ function clientKeyboard(owner: boolean, userId?: number): Keyboard {
     kb.text(`🎁 Попробовать бесплатно (${s.trial.days} дн.)`).row();
   }
   if (getSettings().referral.enabled) kb.text('🤝 Пригласить друга').row();
+  // Показываем, только если владелец завёл хоть один код: иначе кнопка обещает
+  // скидку, которой не существует.
+  if (allPromos().length > 0) kb.text('🎟 Промокод').row();
   kb.text('📱 Установить приложение').text('❓ Помощь').row();
   // Промо-кнопка франшизы — reply-панель не умеет URL-кнопки, поэтому это
   // текст-кнопка, по которой бот присылает ссылку на станок (см. hears ниже).
@@ -205,13 +225,26 @@ bot.callbackQuery('cancel', async (ctx) => {
 });
 
 // ── покупка ───────────────────────────────────────────────────────────────
-async function sendInvoice(ctx: any, pkg: NonNullable<ReturnType<typeof findPackage>>): Promise<void> {
+// Промокод едет в payload самого счёта, а не хранится как «активный код человека»:
+// перезапуск бота иначе терял бы применённую скидку, и человек платил бы полную цену
+// за то, на что ему её пообещали. Старый формат payload (`pkg:<id>`, без кода) обязан
+// читаться дальше — счета уже висят у людей в чатах и должны доплачиваться.
+async function sendInvoice(
+  ctx: any,
+  pkg: NonNullable<ReturnType<typeof findPackage>>,
+  promoCode?: string,
+): Promise<void> {
+  const check = promoCode !== undefined ? checkPromo(promoCode, ctx.from?.id ?? 0) : undefined;
+  const promo = check?.ok ? check.promo : undefined;
+  const stars = promo ? discountedStars(pkg.stars, promo.percent) : pkg.stars;
   await ctx.replyWithInvoice(
     'VPN-доступ',
-    `Доступ к VPN на ${pkg.days} дней`,
-    `pkg:${pkg.id}`,
+    promo
+      ? `Доступ к VPN на ${pkg.days} дней · промокод ${promo.code} (−${promo.percent}%)`
+      : `Доступ к VPN на ${pkg.days} дней`,
+    promo ? `pkg:${pkg.id}:${promo.code}` : `pkg:${pkg.id}`,
     'XTR', // Telegram Stars
-    [{ label: `VPN ${pkg.days} дн.`, amount: pkg.stars }],
+    [{ label: `VPN ${pkg.days} дн.`, amount: stars }],
   );
 }
 
@@ -227,13 +260,25 @@ bot.callbackQuery(/^buy:(.+)$/, async (ctx) => {
   await sendInvoice(ctx, pkg);
 });
 
+bot.callbackQuery(/^buypromo:([^:]+):(.+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const pkg = findPackage(ctx.match[1]);
+  if (!pkg) {
+    await ctx.reply('Этот тариф больше не действует — нажми /start и выбери заново.');
+    return;
+  }
+  await sendInvoice(ctx, pkg, ctx.match[2]);
+});
+
 bot.on('pre_checkout_query', async (ctx) => {
   await ctx.answerPreCheckoutQuery(true);
 });
 
 bot.on('message:successful_payment', async (ctx) => {
   const pay = ctx.message.successful_payment;
-  const pkg = findPackage(pay.invoice_payload.replace(/^pkg:/, ''));
+  // payload: `pkg:<id>` (старый формат) либо `pkg:<id>:<ПРОМОКОД>`.
+  const [payloadPkg, payloadPromo] = pay.invoice_payload.replace(/^pkg:/, '').split(':');
+  const pkg = findPackage(payloadPkg);
   // Копилка реферальных дней применяется ИМЕННО ЗДЕСЬ, при первой же покупке:
   // выдавать пиры тому, кто сам ничего не покупал, значит раздавать бесплатный VPN
   // за приглашения. Пока покупки нет — дни просто лежат (см. referrals.ts::bankDays).
@@ -253,6 +298,9 @@ bot.on('message:successful_payment', async (ctx) => {
   if (bonusDays > 0) {
     await ctx.reply(`🤝 К сроку добавлено ${bonusDays} дн. за приглашённых друзей.`).catch(() => {});
   }
+  // Списываем промокод ТОЛЬКО здесь, после успешной оплаты: списание при вводе
+  // позволяло бы любому желающему сжечь лимит чужого кода, ничего не заплатив.
+  if (payloadPromo) markPromoUsed(payloadPromo, ctx.from.id);
   void awardReferral(ctx.api, ctx.from.id, pkg?.days ?? config.days, pay.telegram_payment_charge_id);
 });
 
@@ -324,6 +372,8 @@ function adminMenu(): InlineKeyboard {
     .row()
     .text('🔔 Напоминания', 'remcfg')
     .text('🤝 Рефералы', 'refcfg')
+    .row()
+    .text('🎟 Промокоды', 'promocfg')
     .row()
     .text('✍️ Приветствие', 'wtext')
     .text('🖼 Фото', 'wphoto')
@@ -453,6 +503,49 @@ bot.callbackQuery('trialcfg', async (ctx) => {
 // и лишний шаг «пришли число» тут только мешает.
 // Реферальная программа — настройка владельца. Выключена по умолчанию: она раздаёт
 // время за его счёт, включать за него нельзя.
+bot.callbackQuery('promocfg', async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!isOwner(ctx.from?.id)) return;
+  const list = allPromos();
+  const kb = new InlineKeyboard();
+  for (const pr of list) {
+    const used = pr.maxUses !== undefined ? `${pr.usedBy.length}/${pr.maxUses}` : String(pr.usedBy.length);
+    kb.text(`🗑 ${pr.code} −${pr.percent}% (${used})`, `promodel:${pr.code}`).row();
+  }
+  if (list.length < PROMO_LIMITS.MAX_PROMOS) kb.text('➕ Добавить промокод', 'promoadd').row();
+  kb.text('← Назад', 'admin');
+  await ctx
+    .editMessageText(
+      '🎟 Промокоды\n\n' +
+        (list.length === 0
+          ? 'Пока ни одного. Промокод даёт скидку в процентах от цены тарифа.'
+          : 'Кнопка удаляет код. В скобках — сколько раз им воспользовались.') +
+        '\n\nОдин человек может использовать один код только раз, и списывается он ' +
+        'только после оплаты.',
+      { reply_markup: kb },
+    )
+    .catch(() => {});
+});
+
+bot.callbackQuery(/^promodel:(.+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!isOwner(ctx.from?.id)) return;
+  removePromo(ctx.match[1]);
+  await showAdmin(ctx, `🗑 Промокод ${ctx.match[1]} удалён.`);
+});
+
+bot.callbackQuery('promoadd', async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!isOwner(ctx.from?.id)) return;
+  await ctx.reply(
+    'Пришли промокод одной строкой: КОД ПРОЦЕНТ [сколько раз можно использовать]\n\n' +
+      'Например:\n' +
+      'LETO 20 — код LETO даёт 20% скидки, без ограничения по количеству\n' +
+      'FRIEND 50 10 — 50% скидки, но только первым 10 покупателям',
+    { reply_markup: ask('promo-add') },
+  );
+});
+
 bot.callbackQuery('refcfg', async (ctx) => {
   await ctx.answerCallbackQuery();
   if (!isOwner(ctx.from?.id)) return;
@@ -773,6 +866,12 @@ bot.command('stats', async (ctx) => {
 // поэтому нажатие панели не «съедается» ожиданием ввода. Клиентские кнопки
 // НЕ трогают pending (это глобальное состояние ввода ВЛАДЕЛЬЦА — обнулять его
 // нажатием клиента нельзя); pending чистит только вход в кабинет владельца.
+bot.hears('🎟 Промокод', async (ctx) => {
+  if (allPromos().length === 0) return;
+  awaitingPromo.set(ctx.from!.id, Date.now());
+  await ctx.reply('🎟 Пришли промокод одним сообщением.');
+});
+
 bot.hears('🤝 Пригласить друга', async (ctx) => {
   const s = getSettings();
   if (!s.referral.enabled) return;
@@ -846,6 +945,34 @@ bot.on('message:photo', async (ctx) => {
 });
 
 bot.on('message:text', async (ctx) => {
+  // Ввод промокода клиентом идёт первым: обработчик владельца ниже обрывает цепочку,
+  // и до отдельного хендлера сообщение бы уже не дошло.
+  const promoWaiter = awaitingPromo.get(ctx.from?.id ?? 0);
+  if (promoWaiter !== undefined) {
+    if (Date.now() - promoWaiter > PROMPT_TTL_MS) {
+      awaitingPromo.delete(ctx.from!.id);
+    } else {
+      const code = ctx.message.text.trim();
+      const res = checkPromo(code, ctx.from!.id);
+      if (!res.ok) {
+        const why =
+          res.reason === 'used'
+            ? 'Этот промокод ты уже использовал.'
+            : res.reason === 'exhausted'
+              ? 'Этот промокод уже исчерпан.'
+              : 'Такого промокода нет — проверь написание.';
+        await ctx.reply(`❌ ${why}`);
+        return;
+      }
+      awaitingPromo.delete(ctx.from!.id);
+      const kb = new InlineKeyboard();
+      for (const pk of getSettings().packages) {
+        kb.text(`${pk.days} дн · ${discountedStars(pk.stars, res.promo.percent)}⭐`, `buypromo:${pk.id}:${res.promo.code}`).row();
+      }
+      await ctx.reply(`✅ Промокод ${res.promo.code} принят: −${res.promo.percent}%. Выбери срок:`, { reply_markup: kb });
+      return;
+    }
+  }
   if (!pending || !isOwner(ctx.from?.id)) return;
   if (expired()) {
     pending = null;
@@ -1004,6 +1131,34 @@ bot.on('message:text', async (ctx) => {
       pending = null;
       await ctx.reply(`✅ Тариф добавлен: ${days} дн. — ${n} ⭐`);
     }
+    return;
+  }
+
+  if (kind === 'promo-add') {
+    const [rawCode, rawPercent, rawMax] = text.split(/\s+/);
+    const percent = Number(rawPercent);
+    const maxUses = rawMax === undefined ? undefined : Number(rawMax);
+    if (!rawCode || !isValidCode(rawCode)) {
+      await ctx.reply('❌ Код: 3–24 символа, латиница, цифры, дефис или подчёркивание. Пришли ещё раз:');
+      return;
+    }
+    if (!isValidPromoPercent(percent)) {
+      await ctx.reply(`❌ Процент — целое число от ${PROMO_LIMITS.MIN_PERCENT} до ${PROMO_LIMITS.MAX_PERCENT}. Пришли ещё раз:`);
+      return;
+    }
+    if (maxUses !== undefined && (!Number.isInteger(maxUses) || maxUses < 1)) {
+      await ctx.reply('❌ Количество использований — целое число от 1. Пришли ещё раз:');
+      return;
+    }
+    if (!addPromo(rawCode, percent, maxUses)) {
+      await ctx.reply('❌ Такой код уже есть, либо достигнут предел количества кодов.');
+      return;
+    }
+    pending = null;
+    await ctx.reply(
+      `✅ Промокод ${rawCode.toUpperCase()} создан: −${percent}%` +
+        (maxUses !== undefined ? `, на ${maxUses} использований.` : ', без ограничения.'),
+    );
     return;
   }
 
