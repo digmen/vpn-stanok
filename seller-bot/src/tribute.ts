@@ -31,13 +31,54 @@ export interface TributeProduct {
   webLink: string;
 }
 
-/** Товары владельца в Tribute. Ошибку не глотаем: по ней бот объясняет, что не так с ключом. */
+/**
+ * Что владелец на самом деле прислал вместо ключа. Разбор вынесен сюда из обработчика
+ * ровно затем, чтобы его можно было проверить тестами: цена ошибки — человек с виду
+ * подключил оплату, а она молчит.
+ *
+ * Терпимо к копипасте: кавычки, приставка «Api-Key:» из документации, пробелы по краям.
+ */
+export function classifyKeyInput(raw: string): { kind: 'link' | 'bot-token' | 'short' | 'ok'; key: string } {
+  const key = raw
+    .replace(/^\s*api[-_ ]?key\s*[:=]?\s*/i, '')
+    .replace(/^["'«<]+|["'»>]+$/g, '')
+    .trim();
+  if (/^https?:\/\//i.test(key) || key.startsWith('t.me/') || key.startsWith('web.tribute.tg')) {
+    return { kind: 'link', key };
+  }
+  if (/^\d+:[A-Za-z0-9_-]{20,}$/.test(key)) return { kind: 'bot-token', key };
+  // Ключ Tribute заметно длиннее: короткая строка — почти наверняка обрезанная копипаста.
+  // Ровно это и прислали 08.09: 32 символа вместо полного ключа.
+  if (key.length < 16) return { kind: 'short', key };
+  return { kind: 'ok', key };
+}
+
+export type KeyVerdict =
+  | { ok: true; rows: TributeProduct[] }
+  // 'invalid' — точный факт: Tribute сказал «не тот ключ».
+  // 'network' — приговор НЕ ключу: не достучались, ответ непонятный, таймаут.
+  // Путать эти два — значит либо сохранить нерабочий ключ, либо выбросить рабочий.
+  | { ok: false; reason: 'invalid' | 'network'; detail: string };
+
+/** Проверка ключа с честным разделением «ключ не тот» и «не смогли проверить». */
+export async function verifyTributeKey(apiKey: string): Promise<KeyVerdict> {
+  try {
+    return { ok: true, rows: await fetchTributeProducts(apiKey) };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { ok: false, reason: msg === INVALID_KEY ? 'invalid' : 'network', detail: msg };
+  }
+}
+
+const INVALID_KEY = 'ключ не подошёл';
+
+/** Товары владельца в Tribute. Ошибку не глотаем: по ней бот объясняет, что именно не так. */
 export async function fetchTributeProducts(apiKey: string): Promise<TributeProduct[]> {
   const res = await fetch(`${TRIBUTE_API}/products?size=100`, {
     headers: { 'Api-Key': apiKey },
     signal: AbortSignal.timeout(15_000),
   });
-  if (res.status === 401 || res.status === 403) throw new Error('ключ не подошёл');
+  if (res.status === 401 || res.status === 403) throw new Error(INVALID_KEY);
   if (!res.ok) throw new Error(`Tribute ответил ${res.status}`);
   const body = (await res.json()) as { rows?: unknown };
   const rows = Array.isArray(body.rows) ? body.rows : [];
@@ -156,9 +197,68 @@ export function webhookUrl(): string | null {
   return `https://${config.nodeDomain}:${config.tributeWebhookPort}/tribute`;
 }
 
+/**
+ * Что вообще происходило на приёме оплат. Нужно ровно затем, чтобы владелец мог САМ
+ * увидеть, дошли ли до него события Tribute, — «оплата не работает» без этого
+ * неотличимо от «ещё ни разу не пробовали».
+ */
+export interface TributeStatus {
+  /** Последнее событие с правильной подписью. */
+  lastEventAt?: number;
+  lastEventName?: string;
+  /** Последний приход с НЕВЕРНОЙ подписью: почти всегда значит, что ключ у нас не тот. */
+  lastBadSigAt?: number;
+  delivered: number;
+  rejected: number;
+}
+
+const STATUS_FILE = path.join(config.dataDir, 'tribute-status.json');
+
+export function tributeStatus(): TributeStatus {
+  try {
+    return JSON.parse(readFileSync(STATUS_FILE, 'utf8')) as TributeStatus;
+  } catch {
+    return { delivered: 0, rejected: 0 };
+  }
+}
+
+function noteStatus(patch: (s: TributeStatus) => TributeStatus): TributeStatus {
+  const next = patch(tributeStatus());
+  try {
+    writeFileSync(STATUS_FILE, JSON.stringify(next));
+  } catch {
+    /* статистика приёма — не повод ронять приём */
+  }
+  return next;
+}
+
+/**
+ * Проверка «а дойдёт ли до меня вообще»: бот стучится на свой же публичный адрес.
+ * Ответ 401 — лучший из возможных: значит порт открыт, сертификат принят, сервер живой
+ * и подпись он проверяет. Молчание — значит Tribute тоже не достучится.
+ */
+export async function selfCheck(): Promise<{ ok: boolean; text: string }> {
+  const url = webhookUrl();
+  if (!config.nodeDomain) return { ok: false, text: 'у этого сервера нет доменного имени — принять оплату картой он не сможет' };
+  if (!certFiles()) return { ok: false, text: `нет сертификата для ${config.nodeDomain} — принять оплату картой нельзя` };
+  if (!server) return { ok: false, text: 'приём выключен — включи оплату картой, тогда бот начнёт слушать' };
+  try {
+    const res = await fetch(url!, {
+      method: 'POST',
+      body: '{"name":"selfcheck"}',
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (res.status === 401) return { ok: true, text: 'адрес доступен снаружи, сертификат в порядке, подпись проверяется' };
+    return { ok: false, text: `адрес ответил ${res.status} — ожидался 401` };
+  } catch (e) {
+    return { ok: false, text: `по своему же адресу достучаться не удалось: ${e instanceof Error ? e.message : e}` };
+  }
+}
+
 let server: Server | null = null;
 let certStamp = '';
 let handler: TributeEventHandler | null = null;
+let onIssue: ((s: TributeStatus) => void) | null = null;
 
 function certVersion(files: { cert: string; key: string }): string {
   try {
@@ -175,8 +275,9 @@ function certVersion(files: { cert: string; key: string }): string {
  * Сервер именно HTTPS и на отдельном порту: 443 на узле занят самим VPN, а 80 обязан
  * оставаться свободным — через него certbot продлевает сертификат.
  */
-export function syncTributeServer(onEvent?: TributeEventHandler): void {
+export function syncTributeServer(onEvent?: TributeEventHandler, onBadSignature?: (s: TributeStatus) => void): void {
   if (onEvent) handler = onEvent;
+  if (onBadSignature) onIssue = onBadSignature;
   const s = getSettings().tribute;
   const files = certFiles();
   const want = s.enabled && s.apiKey !== null && files !== null && handler !== null;
@@ -214,6 +315,11 @@ export function syncTributeServer(onEvent?: TributeEventHandler): void {
         const apiKey = getSettings().tribute.apiKey ?? '';
 
         if (!verifySignature(rawBody, signature, apiKey)) {
+          // Чужой стук по открытому порту тоже сюда попадает, поэтому не паникуем, а
+          // записываем: если ЭТО единственное, что приходит, значит ключ у нас не тот —
+          // Tribute подписывает как раз им. Владелец увидит это на экране настройки.
+          const st = noteStatus((s) => ({ ...s, lastBadSigAt: Date.now(), rejected: s.rejected + 1 }));
+          if (onIssue && signature) onIssue(st);
           res.writeHead(401).end();
           return;
         }
@@ -231,6 +337,7 @@ export function syncTributeServer(onEvent?: TributeEventHandler): void {
         // Отвечаем сразу: выдача ключа (SSH на сервер, отправка в Telegram) бывает дольше
         // таймаута Tribute, а лишний ретрай из-за нашей медлительности плодит дубликаты.
         res.writeHead(200).end();
+        noteStatus((s) => ({ ...s, lastEventAt: Date.now(), lastEventName: ev.name, delivered: s.delivered + 1 }));
         if (!markSeen(dedupeKey(ev))) return;
         void handler!(ev).catch((e) => console.error('Ошибка обработки вебхука Tribute:', e));
       } catch (e) {

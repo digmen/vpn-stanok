@@ -47,9 +47,12 @@ import { buildStats, recordEvent } from './stats.js';
 import { hasUsedTrial, markTrialUsed, trialCount } from './trials.js';
 import { checkUpdate, currentVersion, startSelfUpdate } from './update.js';
 import {
+  classifyKeyInput,
   eventKind,
-  fetchTributeProducts,
   priceLabel,
+  selfCheck,
+  tributeStatus,
+  verifyTributeKey,
   syncTributeServer,
   watchTributeCert,
   webhookUrl,
@@ -1045,27 +1048,62 @@ bot.on('message:text', async (ctx) => {
   if (kind === 'tribute-key') {
     pending = null;
     // Удаляем сообщение с ключом сразу: чат владельца с ботом — не хранилище секретов,
-    // а ключ Tribute даёт доступ к его кассе. Не вышло удалить (нет прав, старое) — так
-    // и скажем, чтобы он убрал сам, а не думал, что всё чисто.
+    // а ключ Tribute даёт доступ к его кассе. Не вышло удалить — честно скажем, чтобы он
+    // убрал сам, а не думал, что всё чисто.
     const wiped = await ctx.deleteMessage().then(() => true).catch(() => false);
-    let rows: TributeProduct[];
-    try {
-      rows = await fetchTributeProducts(text);
-    } catch (e) {
-      // Ключ не сохраняем, пока он не доказал работоспособность: сохранённый нерабочий
-      // ключ выглядит как «подключено», а оплата при этом не придёт вообще.
-      await ctx.reply(`❌ Ключ не принят: ${e instanceof Error ? e.message : e}. Проверь и пришли снова.`);
+
+    const input = classifyKeyInput(text);
+    const key = input.key;
+
+    // Самые частые «не то»: вместо ключа присылают ссылку на товар или токен бота.
+    // Молча отвергнуть — значит оставить человека гадать, что он сделал не так.
+    if (input.kind === 'link') {
+      await ctx.reply(
+        '❌ Это ссылка на товар, а не ключ. Ссылки присылать не нужно — бот берёт их сам.\n\n' +
+          'Ключ лежит в кабинете Tribute: их бот → «…» → Настройки → API-ключи. Это длинная строка ' +
+          'из букв и цифр через дефисы.',
+      );
       return;
     }
-    updateSettings((cur) => ({ ...cur, tribute: { ...cur.tribute, apiKey: text } }));
-    productCache = { at: Date.now(), rows };
+    if (input.kind === 'bot-token') {
+      await ctx.reply('❌ Это токен бота из BotFather, а не ключ Tribute. Нужен ключ из кабинета Tribute → Настройки → API-ключи.');
+      return;
+    }
+    if (input.kind === 'short') {
+      await ctx.reply('❌ Слишком короткая строка для ключа — похоже, скопировалась не целиком. Скопируй ключ полностью и пришли снова.');
+      return;
+    }
+
+    const v = await verifyTributeKey(key);
+    if (!v.ok) {
+      // Ключ не сохраняем, пока он не доказал работоспособность: сохранённый нерабочий
+      // выглядит как «подключено», а оплата при этом не придёт вообще. И «не тот ключ»
+      // отделено от «не смог проверить» — это разные беды с разными действиями.
+      await ctx.reply(
+        v.reason === 'invalid'
+          ? '❌ Tribute не принял этот ключ. Проверь, что копируешь его целиком и из своего кабинета.'
+          : `⚠️ Не смог проверить ключ (${v.detail}). Это не значит, что ключ плохой — попробуй ещё раз через минуту.`,
+      );
+      return;
+    }
+
+    updateSettings((cur) => ({ ...cur, tribute: { ...cur.tribute, apiKey: key } }));
+    productCache = { at: Date.now(), rows: v.rows };
     syncTributeServer();
+    if (v.rows.length === 0) {
+      await ctx.reply(
+        '✅ Ключ принят, но товаров в твоём Tribute пока нет.' + '\n\n' +
+          'Заведи товары там (по одному на каждый срок), потом вернись сюда и нажми «Привязать тарифы».' +
+          (wiped ? '' : '\n\n' + 'Сообщение с ключом удали сам — у меня не хватило прав.'),
+      );
+      return;
+    }
     const url = webhookUrl();
     await ctx.reply(
-      `✅ Ключ принят, товаров в Tribute: ${rows.length}.` +
+      `✅ Ключ принят, товаров в Tribute: ${v.rows.length}.` +
         (wiped ? '' : ' Сообщение с ключом удали сам — у меня не хватило прав.') +
-        (url ? `\n\nТеперь вставь этот адрес в кабинете Tribute (Настройки → API-ключи):\n<code>${url}</code>` : '') +
-        `\n\nДальше: «⚙️ Мой бот» → «💳 Оплата картой» → «Привязать тарифы».`,
+        (url ? '\n\n' + 'Теперь вставь этот адрес в кабинете Tribute (Настройки → API-ключи):' + '\n' + `<code>${url}</code>` : '') +
+        '\n\n' + 'Дальше: «⚙️ Мой бот» → «💳 Оплата картой» → «Привязать тарифы».',
       { parse_mode: 'HTML' },
     );
     return;
@@ -1433,35 +1471,75 @@ async function tributeProducts(force = false): Promise<TributeProduct[]> {
   const key = getSettings().tribute.apiKey;
   if (!key) return [];
   if (!force && productCache && Date.now() - productCache.at < 5 * 60 * 1000) return productCache.rows;
-  const rows = await fetchTributeProducts(key);
-  productCache = { at: Date.now(), rows };
-  return rows;
+  const v = await verifyTributeKey(key);
+  if (!v.ok) throw new Error(v.reason === 'invalid' ? 'ключ больше не подходит — введи новый' : v.detail);
+  productCache = { at: Date.now(), rows: v.rows };
+  return v.rows;
 }
 
+/** Когда что-то было, человеческими словами: «12 минут назад» понятнее, чем метка времени. */
+function ago(at?: number): string {
+  if (!at) return 'ни разу';
+  const m = Math.round((Date.now() - at) / 60000);
+  if (m < 1) return 'только что';
+  if (m < 60) return `${m} мин. назад`;
+  const h = Math.round(m / 60);
+  return h < 24 ? `${h} ч. назад` : `${Math.round(h / 24)} дн. назад`;
+}
+
+/**
+ * Экран настройки — намеренно чек-лист, а не сводка состояния. «Оплата не работает» само
+ * по себе не говорит НИЧЕГО: не введён ключ, не привязаны товары, не вставлен адрес в
+ * Tribute и выключенный приём выглядят снаружи одинаково. Здесь видно, какой именно шаг
+ * не сделан и что делать дальше.
+ */
 function cardText(note?: string): string {
-  const t = getSettings().tribute;
+  const s = getSettings();
+  const t = s.tribute;
   const url = webhookUrl();
-  const bound = t.products.length;
-  const total = getSettings().packages.length;
-  const lines = [
-    '💳 Оплата картой и СБП (через Tribute)',
-    '',
-    `Ключ: ${t.apiKey ? '✅ подключён' : '❌ не задан'}`,
-    `Тарифы с оплатой картой: ${bound} из ${total}`,
-    `Приём оплат: ${t.enabled && t.apiKey && bound > 0 ? '🟢 включён' : '🔴 выключен'}`,
-  ];
-  if (url) {
+  const st = tributeStatus();
+  const unbound = s.packages.filter((p) => !t.products.some((x) => x.pkgId === p.id));
+  const ready = t.apiKey !== null && t.products.length > 0;
+
+  const lines = ['💳 Оплата картой и СБП (через Tribute)', ''];
+
+  if (!url) {
+    // Не молчим и не показываем шаги, которые всё равно ни к чему не приведут.
     lines.push(
-      '',
-      'Адрес для кабинета Tribute (Настройки → API-ключи → webhook URL):',
-      `<code>${url}</code>`,
-      '',
-      'Без этого адреса Tribute не сообщит боту об оплате, и ключ клиенту не уйдёт.',
+      '⚠️ У этого сервера нет доменного имени с сертификатом, а без него Tribute не сможет',
+      'сообщить об оплате. Оплату картой тут включить нельзя — напиши в станок.',
     );
-  } else {
-    // Не молчим: у узла без домена и сертификата вебхуку физически некуда прийти.
-    lines.push('', '⚠️ На этом сервере нет домена с сертификатом — принять оплату картой он не сможет. Напиши в станок.');
+    return lines.join('\n');
   }
+
+  lines.push(`1. Ключ Tribute — ${t.apiKey ? '✅ принят' : '❌ не введён'}`);
+  lines.push(
+    `2. Тарифы привязаны к товарам — ${t.products.length} из ${s.packages.length}` +
+      (t.apiKey === null ? ' (сначала ключ)' : unbound.length > 0 ? ` ❌ без оплаты картой: ${unbound.map((p) => p.days + ' дн.').join(', ')}` : ' ✅'),
+  );
+  lines.push(
+    `3. Адрес вставлен в кабинете Tribute — ` +
+      (st.lastEventAt
+        ? `✅ события приходят (последнее ${ago(st.lastEventAt)})`
+        : st.lastBadSigAt
+          ? `⚠️ стучатся, но подпись не сходится (${ago(st.lastBadSigAt)}) — скорее всего ключ здесь не от того кабинета`
+          : '❓ ни одного события ещё не приходило'),
+  );
+  lines.push(`4. Приём включён — ${t.enabled && ready ? '🟢 да' : '🔴 нет'}`);
+
+  lines.push('', 'Адрес для кабинета Tribute (Настройки → API-ключи → webhook):', `<code>${url}</code>`);
+
+  // Ровно один следующий шаг: список из четырёх дел одновременно читается как «всё сломано».
+  const next = !t.apiKey
+    ? 'Дальше: нажми «Ввести ключ Tribute».'
+    : t.products.length === 0
+      ? 'Дальше: нажми «Привязать тарифы» — бот покажет твои товары из Tribute.'
+      : !t.enabled
+        ? 'Дальше: нажми «Включить» — после этого бот начнёт принимать оплаты.'
+        : !st.lastEventAt
+          ? 'Дальше: вставь адрес выше в кабинете Tribute и нажми там «Отправить тестовый запрос» — я сразу напишу, что получил.'
+          : 'Всё настроено. Кнопка «Оплатить картой» показывается клиентам рядом со звёздами.';
+  lines.push('', next);
   if (note) lines.push('', note);
   return lines.join('\n');
 }
@@ -1472,6 +1550,7 @@ function cardMenu(): InlineKeyboard {
   if (t.apiKey) {
     kb.text('🔗 Привязать тарифы', 'tribbind').row();
     if (t.products.length > 0) kb.text(t.enabled ? '🔴 Выключить' : '🟢 Включить', 'tribtoggle').row();
+    kb.text('🩺 Проверить приём', 'tribcheck').row();
   }
   return kb.text('← Назад', 'admin');
 }
@@ -1506,6 +1585,22 @@ bot.callbackQuery('tribtoggle', async (ctx) => {
   updateSettings((cur) => ({ ...cur, tribute: { ...cur.tribute, enabled: !cur.tribute.enabled } }));
   syncTributeServer();
   await showCard(ctx, getSettings().tribute.enabled ? '🟢 Приём оплат картой включён.' : '🔴 Приём оплат картой выключен.');
+});
+
+// Самопроверка: бот стучится на свой же публичный адрес и говорит, дойдёт ли до него
+// Tribute. Без неё владельцу оставалось бы гадать между «не вставил адрес», «порт закрыт»
+// и «сертификат протух» — снаружи это одно и то же молчание.
+bot.callbackQuery('tribcheck', async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!isOwner(ctx.from?.id)) return;
+  const r = await selfCheck();
+  const st = tributeStatus();
+  await showCard(
+    ctx,
+    `${r.ok ? '✅' : '❌'} ${r.text}` +
+      '\n\n' +
+      `Событий от Tribute принято: ${st.delivered}, отклонено по подписи: ${st.rejected}.`,
+  );
 });
 
 bot.callbackQuery('tribbind', async (ctx) => {
@@ -1562,6 +1657,19 @@ bot.callbackQuery(/^tribset:([^:]+):(.+)$/, async (ctx) => {
     await showCard(ctx, '❌ Такого товара в Tribute больше нет — обнови список и выбери заново.');
     return;
   }
+  // И наоборот: один товар нельзя повесить на два тарифа. В вебхуке приходит только товар,
+  // и по нему было бы не понять, какой срок выдавать — выдали бы наугад.
+  const clash = getSettings().tribute.products.find((x) => x.productId === prod.id && x.pkgId !== pkgId);
+  if (clash) {
+    const other = findPackage(clash.pkgId);
+    await showCard(
+      ctx,
+      `❌ Этот товар уже привязан к тарифу ${other ? other.days + ' дн.' : clash.pkgId}. ` +
+        'Один товар — один тариф: иначе по оплате не понять, какой срок выдавать. ' +
+        'Заведи в Tribute отдельный товар под этот срок.',
+    );
+    return;
+  }
   updateSettings((cur) => ({
     ...cur,
     tribute: {
@@ -1590,7 +1698,22 @@ bot.callbackQuery(/^tribset:([^:]+):(.+)$/, async (ctx) => {
 async function handleTributeEvent(ev: TributeWebhookEvent): Promise<void> {
   const p = ev.payload ?? {};
   const kind = eventKind(ev.name);
-  if (kind === 'other') return;
+  // Тестовый запрос из кабинета Tribute — единственное доказательство, что адрес вставлен
+  // верно и связь есть. Молча его проглотить значит лишить владельца этой проверки:
+  // снаружи «дошло» и «не дошло» выглядят одинаково.
+  if (kind === 'other') {
+    const owner = getOwnerId();
+    if (owner) {
+      await bot.api
+        .sendMessage(
+          owner,
+          `✅ Tribute достучался до бота (событие «${ev.name}»). Адрес вставлен верно, ` +
+            'приём оплат работает. Это служебное событие, покупкой оно не является.',
+        )
+        .catch(() => {});
+    }
+    return;
+  }
 
   const buyer = p.telegram_user_id;
   const productId = p.product_id;
@@ -1650,7 +1773,26 @@ async function handleTributeEvent(ev: TributeWebhookEvent): Promise<void> {
   }
 }
 
-syncTributeServer(handleTributeEvent);
+/**
+ * Стук с неверной подписью почти всегда значит одно: ключ у нас не от того кабинета —
+ * Tribute подписывает тело как раз им. Владельцу об этом надо знать, иначе он будет
+ * ждать оплат, которые молча отбиваются. Пишем не чаще раза в час: сканеры интернета
+ * тоже стучатся в открытый порт, и превращать это в поток сообщений нельзя.
+ */
+let lastBadSigNotice = 0;
+syncTributeServer(handleTributeEvent, () => {
+  const owner = getOwnerId();
+  if (!owner || Date.now() - lastBadSigNotice < 60 * 60 * 1000) return;
+  lastBadSigNotice = Date.now();
+  void bot.api
+    .sendMessage(
+      owner,
+      '⚠️ Кто-то стучится на адрес оплаты, но подпись не сходится.' + '\n\n' +
+        'Если это Tribute — значит ключ здесь не от того кабинета: замени его в ' +
+        '«⚙️ Мой бот» → «💳 Оплата картой». Пока подпись не сходится, оплаты не засчитываются.',
+    )
+    .catch(() => {});
+});
 watchTributeCert();
 
 await bot.start({

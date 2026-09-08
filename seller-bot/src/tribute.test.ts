@@ -10,7 +10,7 @@ import path from 'node:path';
 process.env.SELLER_BOT_TOKEN ??= '1:test';
 process.env.DATA_DIR ??= fs.mkdtempSync(path.join(os.tmpdir(), 'seller-trib-'));
 
-const { dedupeKey, eventKind, priceLabel, verifySignature } = await import('./tribute.js');
+const { classifyKeyInput, dedupeKey, eventKind, priceLabel, verifySignature } = await import('./tribute.js');
 const { normalize, packageForTributeProduct, tributeUrlFor } = await import('./settings.js');
 
 // 🔴 Цена ошибки здесь — «человек заплатил, а ключа нет». Именно так уже случалось:
@@ -84,4 +84,26 @@ test('ссылка на оплату картой доступна только 
     assert.equal(url.url, 'https://web.tribute.tg/p/Dag');
     assert.equal(pkg, 'p1');
   }
+});
+
+// Владелец настраивает оплату сам, вслепую и один раз — поэтому кривой ввод обязан
+// объясняться словами, а не молча не срабатывать. Каждая ветка тут — реальная ошибка,
+// которую человек уже совершал.
+test('бот понимает, что владелец прислал вместо ключа', () => {
+  // 08.09 в чат прислали ровно это: ссылки на товары вместо ключа.
+  assert.equal(classifyKeyInput('https://web.tribute.tg/p/DW0').kind, 'link');
+  assert.equal(classifyKeyInput('t.me/tribute/app?startapp=pDVQ').kind, 'link');
+  // Токен бота из BotFather — вторая по частоте путаница.
+  assert.equal(classifyKeyInput('8573640081:AAHxyz_abcdefghijklmnopqrstuvwxyz').kind, 'bot-token');
+  // И обрезанная копипаста: прислали 32 символа вместо полного ключа.
+  assert.equal(classifyKeyInput('f138f7b4').kind, 'short');
+  assert.equal(classifyKeyInput('').kind, 'short');
+});
+
+test('ключ чистится от того, как его скопировали', () => {
+  const key = 'f138f7b4-ab35-4c5c-97a6-46f8870dc0de';
+  assert.deepEqual(classifyKeyInput(`  ${key} `), { kind: 'ok', key });
+  assert.deepEqual(classifyKeyInput(`Api-Key: ${key}`), { kind: 'ok', key });
+  assert.deepEqual(classifyKeyInput(`"${key}"`), { kind: 'ok', key });
+  assert.deepEqual(classifyKeyInput(`«${key}»`), { kind: 'ok', key });
 });
