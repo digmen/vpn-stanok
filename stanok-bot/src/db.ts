@@ -47,6 +47,12 @@ for (const sql of [
   `ALTER TABLE nodes ADD COLUMN relay_host TEXT`,
   `ALTER TABLE nodes ADD COLUMN relay_port INTEGER`,
   `ALTER TABLE nodes ADD COLUMN replaced_node_id INTEGER`,
+  // 🔴 08.09: узел может быть живым и при этом НЕ должен получать рассылки франшизы —
+  // например, у владельца свой отдельный проект и свой бот, и новости чужого продукта
+  // ему не нужны. Раньше это держалось в моей голове (слал вручную и вычёркивал), и
+  // через общую команду рассылки человек тут же получил лишнее сообщение. Теперь это
+  // данные, а не память.
+  `ALTER TABLE nodes ADD COLUMN no_broadcast INTEGER NOT NULL DEFAULT 0`,
 ]) {
   try {
     db.exec(sql);
@@ -89,6 +95,8 @@ export interface NodeRow {
    *  «пересоздал сервер, старый недоступен») — id того узла, для истории/логов.
    *  NULL у всех обычных узлов. */
   replaced_node_id: number | null;
+  /** 1 — узел исключён из рассылок владельцам (см. миграцию выше). */
+  no_broadcast: number;
   created_at: string;
   updated_at: string;
 }
@@ -230,6 +238,18 @@ export function setSellerTokenForUser(tgUserId: number, sellerTokenEnc: string):
     sellerTokenEnc,
     tgUserId,
   );
+}
+
+/** Кому уходят рассылки: живые primary-узлы, кроме явно исключённых. */
+export function getBroadcastNodes(): NodeRow[] {
+  return db
+    .prepare("SELECT * FROM nodes WHERE status = 'ready' AND is_primary = 1 AND no_broadcast = 0 ORDER BY id")
+    .all() as NodeRow[];
+}
+
+/** Исключить узел из рассылок (или вернуть обратно). */
+export function setNodeBroadcast(id: number, allowed: boolean): void {
+  db.prepare("UPDATE nodes SET no_broadcast = ?, updated_at = datetime('now') WHERE id = ?").run(allowed ? 0 : 1, id);
 }
 
 /** Живые узлы, на которых реально крутится бот-продавец — их токены и проверяет монитор. */

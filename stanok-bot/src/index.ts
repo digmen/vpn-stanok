@@ -6,7 +6,9 @@ import {
   getNodeById,
   getNodesByUser,
   getReadyNodes,
+  getBroadcastNodes,
   getReadyPrimaryNodes,
+  setNodeBroadcast,
   getRevenueShareNodes,
   setNodeHealthOk,
   setRevenueSharePercent,
@@ -129,7 +131,10 @@ bot.command('status', async (ctx) => {
 bot.command('help', async (ctx) => {
   const base = '/start — начать\n/status — статус твоих серверов\n/token — заменить токен бота-продавца';
   // Админские команды видит только админ — остальным они не нужны и только путают.
-  const admin = '\n\n/say <текст> — рассылка владельцам\n/undo — откатить последнюю рассылку';
+  const admin =
+    '\n\n/say <текст> — рассылка владельцам (сначала покажу список получателей)' +
+    '\n/undo — откатить последнюю рассылку' +
+    '\n/nosay <id> — исключить узел из рассылок';
   await ctx.reply(config.adminIds.includes(ctx.from?.id ?? -1) ? base + admin : base);
 });
 
@@ -286,6 +291,11 @@ bot.on('message:text', async (ctx) => {
 // В текст рассылки НЕ подставляем ничего от себя: ни номеров узлов, ни имён — уходит
 // ровно то, что написал владелец станка. Раньше я дописывал в конец служебную строку
 // с перечислением, кому ушло, и это лишнее в сообщении, которое человек может переслать.
+// Черновик рассылки ждёт подтверждения. Живёт в памяти и недолго: рассылка — действие,
+// которое нельзя «недоделать», и висящий сутками черновик опаснее потерянного.
+let sayDraft: { text: string; targets: { id: number; label: string }[]; at: number } | null = null;
+const SAY_TTL_MS = 600_000;
+
 bot.command('say', async (ctx) => {
   if (!config.adminIds.includes(ctx.from?.id ?? -1)) return;
   const text = ctx.match?.trim();
@@ -293,32 +303,80 @@ bot.command('say', async (ctx) => {
     await ctx.reply('Напиши текст после команды:\n/say Привет! Появились промокоды и скидки.');
     return;
   }
-  const owners = [...new Set(getReadyPrimaryNodes().map((n) => n.tg_user_id))];
-  if (owners.length === 0) {
-    await ctx.reply('Некому рассылать — нет ни одного живого узла.');
+  const nodes = getBroadcastNodes();
+  if (nodes.length === 0) {
+    await ctx.reply('Некому рассылать: нет живых узлов, либо все исключены из рассылок.');
     return;
   }
-  const { record, failed } = await broadcast(ctx.api, owners, text);
+  // Один владелец может держать несколько узлов — письмо ему нужно одно.
+  const byOwner = new Map<number, string>();
+  for (const n of nodes) {
+    if (!byOwner.has(n.tg_user_id)) byOwner.set(n.tg_user_id, `#${n.id} @${n.tg_username ?? n.tg_user_id}`);
+  }
+  sayDraft = {
+    text,
+    targets: [...byOwner].map(([id, label]) => ({ id, label })),
+    at: Date.now(),
+  };
+
+  // 🔴 08.09: показываем СПИСОК ПОЛУЧАТЕЛЕЙ до отправки. Раньше команда слала сразу, и
+  // человек, которому рассылка была не нужна, получил её — увидели это уже постфактум.
+  // Список видит только админ, в само сообщение он не попадает.
+  const kb = new InlineKeyboard().text('✅ Отправить', 'saysend').text('❌ Отмена', 'saycancel');
   await ctx.reply(
-    `📢 Отправлено: ${record.sent.length} из ${owners.length}` +
-      (failed.length > 0 ? ` (не доставлено ${failed.length})` : '') +
-      '\n\nЕсли передумал — /undo, удалю у всех.',
+    `📢 Получат (${sayDraft.targets.length}):\n` +
+      sayDraft.targets.map((x) => '• ' + x.label).join('\n') +
+      '\n\n─── текст ───\n' +
+      text +
+      '\n───\n\nПроверь список и текст. Отправляем?',
+    { reply_markup: kb },
   );
 });
 
-bot.command('undo', async (ctx) => {
+bot.callbackQuery('saycancel', async (ctx) => {
+  await ctx.answerCallbackQuery();
   if (!config.adminIds.includes(ctx.from?.id ?? -1)) return;
-  const last = lastBroadcast();
-  if (!last) {
-    await ctx.reply('Откатывать нечего — рассылок не было.');
+  sayDraft = null;
+  await ctx.editMessageText('❌ Рассылка отменена, никому ничего не ушло.').catch(() => {});
+});
+
+bot.callbackQuery('saysend', async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!config.adminIds.includes(ctx.from?.id ?? -1)) return;
+  if (!sayDraft || Date.now() - sayDraft.at > SAY_TTL_MS) {
+    sayDraft = null;
+    await ctx.editMessageText('⌛ Черновик устарел — набери /say заново.').catch(() => {});
     return;
   }
-  const res = await undoLast(ctx.api);
-  if (!res) return;
-  await ctx.reply(
-    `↩️ Откат «${res.preview}»\nУдалено: ${res.ok}` +
-      (res.failed > 0 ? `, не вышло: ${res.failed} (старше 48 часов или уже удалено)` : ''),
-  );
+  const draft = sayDraft;
+  sayDraft = null;
+  const { record, failed } = await broadcast(ctx.api, draft.targets.map((x) => x.id), draft.text);
+  await ctx
+    .editMessageText(
+      `📢 Отправлено: ${record.sent.length} из ${draft.targets.length}` +
+        (failed.length > 0 ? ` (не доставлено ${failed.length})` : '') +
+        '\n\nПередумал — /undo, удалю у всех.',
+    )
+    .catch(() => {});
+});
+
+// Исключить владельца из рассылок или вернуть обратно: /nosay <id узла> [on]
+bot.command('nosay', async (ctx) => {
+  if (!config.adminIds.includes(ctx.from?.id ?? -1)) return;
+  const m = (ctx.match ?? '').trim().match(/^(\d+)(\s+on)?$/);
+  if (!m) {
+    await ctx.reply('/nosay <id узла> — исключить из рассылок\n/nosay <id узла> on — вернуть обратно');
+    return;
+  }
+  const id = Number(m[1]);
+  const node = getNodeById(id);
+  if (!node) {
+    await ctx.reply(`Узла #${id} нет.`);
+    return;
+  }
+  const allowed = Boolean(m[2]);
+  setNodeBroadcast(id, allowed);
+  await ctx.reply(allowed ? `Узел #${id} снова получает рассылки.` : `Узел #${id} исключён из рассылок.`);
 });
 
 bot.catch((err) => {
