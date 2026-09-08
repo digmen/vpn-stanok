@@ -209,7 +209,10 @@ export interface TributeStatus {
   /** Последний приход с НЕВЕРНОЙ подписью: почти всегда значит, что ключ у нас не тот. */
   lastBadSigAt?: number;
   delivered: number;
+  /** Подписанные, но с неверной подписью — почти всегда «ключ не от того кабинета». */
   rejected: number;
+  /** Совсем без подписи: сканеры интернета и наша же самопроверка. Диагнозу не мешают. */
+  unsigned?: number;
 }
 
 const STATUS_FILE = path.join(config.dataDir, 'tribute-status.json');
@@ -318,8 +321,15 @@ export function syncTributeServer(onEvent?: TributeEventHandler, onBadSignature?
           // Чужой стук по открытому порту тоже сюда попадает, поэтому не паникуем, а
           // записываем: если ЭТО единственное, что приходит, значит ключ у нас не тот —
           // Tribute подписывает как раз им. Владелец увидит это на экране настройки.
-          const st = noteStatus((s) => ({ ...s, lastBadSigAt: Date.now(), rejected: s.rejected + 1 }));
-          if (onIssue && signature) onIssue(st);
+          // Считаем «чужой подписью» ТОЛЬКО подписанный запрос: без подписи стучится кто
+          // угодно, включая нашу же кнопку самопроверки, и от этого счётчика зависит
+          // диагноз «ключ не от того кабинета» — ложный он хуже, чем никакого.
+          if (signature) {
+            const st = noteStatus((s) => ({ ...s, lastBadSigAt: Date.now(), rejected: s.rejected + 1 }));
+            if (onIssue) onIssue(st);
+          } else {
+            noteStatus((s) => ({ ...s, unsigned: (s.unsigned ?? 0) + 1 }));
+          }
           res.writeHead(401).end();
           return;
         }
