@@ -11,8 +11,9 @@ import { attachLocationToPrimary } from './attach-location.js';
 import { nodeDomain, registerNodeDns } from './dns.js';
 import { restoreBackup } from './backup.js';
 import { TOKEN_INVALID_HELP, verifyBotToken } from './bot-token.js';
-import { testFromRussia } from './ru-probe.js';
+import { testFromRussia, viaRelay } from './ru-probe.js';
 import { enableRelay } from './relay.js';
+import { humanInstallError } from './install-error.js';
 import { notifyAdmins } from './admin.js';
 import { checkSshPort, preflightMessage } from './preflight.js';
 import { logEvent } from './events.js';
@@ -160,7 +161,12 @@ export async function provisionNode(
     let ruFailed: Awaited<ReturnType<typeof testFromRussia>> = null;
     if (protocol !== 'amneziawg') {
       ruFailed = await testFromRussia(firstClientConfig);
-      if (ruFailed && !ruFailed.ok) {
+      if (ruFailed?.inconclusive) {
+        // Проверить не получилось — это НЕ «узел недоступен из РФ». Говорим как есть и
+        // ничего по такому результату не меняем (см. RuProbeResult.inconclusive).
+        await notifyAdmins(api, `❔ Узел #${nodeId} (${node.server_ip}): ${ruFailed.detail}. Узел не трогаю.`);
+        ruFailed = null;
+      } else if (ruFailed && !ruFailed.ok) {
         await notifyAdmins(
           api,
           `⚠️ Узел #${nodeId} (${node.server_ip}) прошёл проверку со станка, но НЕ отвечает ` +
@@ -237,10 +243,25 @@ export async function provisionNode(
         try {
           const relay = await enableRelay(node, password);
           setNodeRelay(nodeId, relay.host, relay.port);
-          ruWarning =
-            '\n\n✅ Заметил, что из России сервер напрямую недоступен, и уже включил обход — ' +
-            'клиенты подключаются автоматически через запасной маршрут, ничего делать не нужно.';
-          await notifyAdmins(api, `🔀 Узел #${nodeId}: включён релей через Прагу (${relay.host}:${relay.port}).`);
+          // 🔴 Раньше релей включали и сразу объявляли «клиенты подключаются» — сам обход
+          // из России никто не проверял. Проверяем тем же клиентом и тем же путём, каким
+          // пойдут люди: иначе «готово» — это наш серверный признак, а не их интернет.
+          const viaRelayCheck = await testFromRussia(viaRelay(firstClientConfig, relay.host, relay.port));
+          const relayOk = viaRelayCheck === null || viaRelayCheck.ok;
+          ruWarning = relayOk
+            ? '\n\n✅ Заметил, что из России сервер напрямую недоступен, и уже включил обход — ' +
+              'клиенты подключаются автоматически через запасной маршрут, ничего делать не нужно.'
+            : '\n\n⚠️ Из России сервер напрямую недоступен. Обход я включил, но и через него проверка ' +
+              'из России не прошла — я уже разбираюсь, напишу, как будет ясно.';
+          await notifyAdmins(
+            api,
+            `🔀 Узел #${nodeId}: включён релей через Прагу (${relay.host}:${relay.port}). ` +
+              (viaRelayCheck === null
+                ? 'Проверить его из РФ нечем — проба не настроена.'
+                : viaRelayCheck.ok
+                  ? `Проверен из РФ: ${viaRelayCheck.detail}.`
+                  : `🔴 Через релей из РФ тоже НЕ работает: ${viaRelayCheck.detail}`),
+          );
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
           ruWarning =
@@ -320,10 +341,12 @@ export async function provisionNode(
     setNodeStatus(nodeId, 'error');
     const msg = e instanceof Error ? e.message : String(e);
     logEvent(who, 'provision_fail', `${node.server_ip} · ${msg}`.slice(0, 200));
+    // Владельцу — не сырой вывод скрипта, а что с этим делать: «tput: No value for $TERM»
+    // четыре раза подряд (#21, 11.09) говорит ему только «всё сломано», и он уходит.
+    // Подробности целиком получаем мы — в тревоге ниже и в сохранённом логе.
     await show(
-      `❌ Не получилось довести настройку:\n${msg}\n\n` +
-        'Можно нажать «Попробовать снова» — заново вводить ничего не нужно. ' +
-        'Я уже вижу ошибку и разберусь.',
+      `❌ Не получилось довести настройку.\n\n${humanInstallError(msg)}\n\n` +
+        'Заново вводить ничего не нужно — только нажать кнопку.',
       retryKb,
     );
     await notifyAdmins(

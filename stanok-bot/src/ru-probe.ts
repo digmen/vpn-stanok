@@ -17,6 +17,51 @@ const execFileP = promisify(execFile);
 export interface RuProbeResult {
   ok: boolean;
   detail: string;
+  /** true — проверить НЕ получилось вообще (не тот профиль, упала сама проба). Это не
+   *  приговор узлу, и по такому результату нельзя ничего менять на серверах: проба не
+   *  умела WS+TLS, на каждом новом узле «проваливалась» и сама включала релей через
+   *  Прагу трём узлам подряд (#22–#24) — по результату, которого на деле не было. */
+  inconclusive?: boolean;
+}
+
+/**
+ * Клиентский профиль xray под ссылку. Разбираем по параметрам самой ссылки, а не по
+ * протоколу узла: так проба проверяет ровно то, что получит клиент.
+ *
+ * 🔴 Раньше здесь был только Reality, и WS+TLS молча уходил в «нет pbk/sid — провал».
+ * Тот же класс бага, что уже ловили 08.09 (`=== 'vless_reality'`): новый вариант не
+ * попадает ни в одну ветку и тихо превращается в неверный ответ.
+ */
+export function clientStream(params: URLSearchParams): { stream: object; flow?: string } | { error: string } {
+  const security = params.get('security');
+  const type = params.get('type') ?? 'tcp';
+  if (security === 'reality') {
+    const pbk = params.get('pbk');
+    const sid = params.get('sid');
+    const sni = params.get('sni');
+    if (!pbk || !sid || !sni) return { error: 'в Reality-ссылке нет pbk/sid/sni' };
+    return {
+      flow: 'xtls-rprx-vision',
+      stream: {
+        network: 'tcp',
+        security: 'reality',
+        realitySettings: { serverName: sni, fingerprint: 'chrome', publicKey: pbk, shortId: sid },
+      },
+    };
+  }
+  if (security === 'tls' && type === 'ws') {
+    const sni = params.get('sni') ?? params.get('host');
+    if (!sni) return { error: 'в WS+TLS-ссылке нет sni/host' };
+    return {
+      stream: {
+        network: 'ws',
+        security: 'tls',
+        tlsSettings: { serverName: sni, fingerprint: 'chrome' },
+        wsSettings: { path: params.get('path') ?? '/', headers: { Host: params.get('host') ?? sni } },
+      },
+    };
+  }
+  return { error: `профиль ${type}/${security ?? 'без шифрования'} проба проверять не умеет` };
 }
 
 export async function testFromRussia(vlessLink: string, waitMs = 6000): Promise<RuProbeResult | null> {
@@ -25,15 +70,13 @@ export async function testFromRussia(vlessLink: string, waitMs = 6000): Promise<
   if (!host || !keyPath) return null;
 
   const m = vlessLink.match(/^vless:\/\/([^@]+)@([^:/?#]+):(\d+)\?([^#]*)/i);
-  if (!m) return { ok: false, detail: 'не удалось разобрать vless-ссылку для RU-пробы' };
+  if (!m) return { ok: false, inconclusive: true, detail: 'не удалось разобрать vless-ссылку для RU-пробы' };
   const params = new URLSearchParams(m[4]);
   const uuid = m[1];
   const targetHost = m[2];
   const port = m[3];
-  const pbk = params.get('pbk');
-  const sid = params.get('sid');
-  const sni = params.get('sni');
-  if (!pbk || !sid || !sni) return { ok: false, detail: 'в ссылке нет pbk/sid/sni — не Reality-профиль' };
+  const profile = clientStream(params);
+  if ('error' in profile) return { ok: false, inconclusive: true, detail: `проверка из РФ не выполнена: ${profile.error}` };
 
   const socksPort = 20000 + Math.floor(Math.random() * 10000);
   const tag = Math.random().toString(36).slice(2, 8);
@@ -43,12 +86,16 @@ export async function testFromRussia(vlessLink: string, waitMs = 6000): Promise<
     outbounds: [
       {
         protocol: 'vless',
-        settings: { vnext: [{ address: targetHost, port: Number(port), users: [{ id: uuid, encryption: 'none', flow: 'xtls-rprx-vision' }] }] },
-        streamSettings: {
-          network: 'tcp',
-          security: 'reality',
-          realitySettings: { serverName: sni, fingerprint: 'chrome', publicKey: pbk, shortId: sid },
+        settings: {
+          vnext: [
+            {
+              address: targetHost,
+              port: Number(port),
+              users: [{ id: uuid, encryption: 'none', ...(profile.flow ? { flow: profile.flow } : {}) }],
+            },
+          ],
         },
+        streamSettings: profile.stream,
       },
     ],
   });
@@ -119,6 +166,15 @@ export async function testFromRussia(vlessLink: string, waitMs = 6000): Promise<
     }
     return { ok: true, detail: `подключение и передача данных из РФ в порядке, вышел через ${ip}, ~${Math.round(speed)} байт/с` };
   } catch (e) {
-    return { ok: false, detail: 'RU-проба не смогла даже подключиться к тестовому серверу: ' + (e instanceof Error ? e.message : String(e)) };
+    return {
+      ok: false,
+      inconclusive: true,
+      detail: 'RU-проба не смогла даже подключиться к тестовому серверу: ' + (e instanceof Error ? e.message : String(e)),
+    };
   }
+}
+
+/** Та же ссылка, но через релей: меняется только адрес и порт, всё остальное — как у узла. */
+export function viaRelay(vlessLink: string, host: string, port: number): string {
+  return vlessLink.replace(/^(vless:\/\/[^@]+@)[^:/?#]+:\d+/i, `$1${host}:${port}`);
 }

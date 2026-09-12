@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { NodeSSH } from 'node-ssh';
 import { REMOTE, SSH } from './constants.js';
 import { extractClientConfig } from './parse.js';
+import { meaningfulTail, saveInstallLog } from './install-error.js';
 import { testHandshake, testVlessRealityHandshake, testVlessWsTlsHandshake } from './handshake-test.js';
 import type { NodeProtocol } from './db.js';
 
@@ -58,10 +59,16 @@ export async function runRemoteInstall(opts: RemoteInstallOptions): Promise<stri
   try {
     await ssh.putFile(opts.scriptLocalPath, REMOTE.INSTALL_SCRIPT);
     const argStr = (opts.args ?? []).map(shellQuote).join(' ');
-    const res = await ssh.execCommand(`bash ${REMOTE.INSTALL_SCRIPT} ${argStr}`);
+    // TERM=dumb: без терминала установщик xray сыплет «tput: No value for $TERM», и этот
+    // мусор вытеснял из сообщения настоящую причину (узел #21, 11.09 — см. install-error.ts).
+    const res = await ssh.execCommand(`TERM=dumb bash ${REMOTE.INSTALL_SCRIPT} ${argStr}`);
 
     if (res.code !== 0) {
-      throw new Error(`install-скрипт упал (code ${res.code}): ${res.stderr || res.stdout}`.slice(0, 500));
+      const saved = saveInstallLog(opts.host, res.code, res.stdout, res.stderr);
+      throw new Error(
+        `install-скрипт упал (code ${res.code}): ${meaningfulTail(res.stderr, res.stdout)}` +
+          (saved ? `\n(полный вывод: ${path.basename(saved)})` : ''),
+      );
     }
 
     const cfg = extractClientConfig(res.stdout);
@@ -131,7 +138,7 @@ export async function checkNodeAlive(
     await ssh.putFile(scripts.add, remotePath);
     const addRes = await ssh.execCommand(`bash ${remotePath}`);
     if (addRes.code !== 0) {
-      return { ok: false, detail: 'не удалось выдать тестовый пир: ' + (addRes.stderr || addRes.stdout).slice(0, 200) };
+      return { ok: false, detail: 'не удалось выдать тестовый пир: ' + meaningfulTail(addRes.stderr, addRes.stdout, 3).slice(0, 300) };
     }
     const config = extractClientConfig(addRes.stdout);
     const pkMatch = addRes.stdout.match(/###CLIENT_PUBKEY###(.+)/);
