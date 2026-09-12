@@ -232,6 +232,13 @@ describe('сводка по людям', () => {
     const report = A.funnelReport(30);
     expect(report).toContain('С первого раза, без единой ошибки: 1 из 2');
     expect(report).toContain('@gone (не смог прислать IP)');
+    // приглашение — тем, кто до сервера не дошёл; с узлом и «Не напоминать» — нет
+    ins.run(7004, 'nope', 'start', null, at(120));
+    ins.run(7004, 'nope', 'nudge_off', null, at(119));
+    const inv = A.inviteTargets().map((u) => u.id);
+    expect(inv).toContain(7003);
+    expect(inv).not.toContain(7001);
+    expect(inv).not.toContain(7004);
     // шаги напоминаний не считаются действием человека
     E.logEvent({ id: 7003 }, 'nudge', 'n_ip');
     expect(A.loadUserStates().find((u) => u.id === 7003)!.lastAt).toBe(by(7003).lastAt);

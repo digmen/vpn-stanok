@@ -23,8 +23,7 @@ import { hadRecentEvent, logEvent, userTimeline } from './events.js';
 import { chatTranscript, clearSecretWait, logIncoming, logOutgoing, pruneChatLog, resolveUser } from './chat-log.js';
 import { funnelReport } from './analytics.js';
 import { runNudges } from './nudges.js';
-import { BONUS_KEY, PROMO_KEY, buyGuideText, hostPromo, savingsText } from './host-guide.js';
-import { kvSet } from './kv.js';
+import { buyGuideText } from './host-guide.js';
 
 /** Telegram режет сообщения на 4096 символах — длинные отчёты шлём кусками по строкам. */
 function chunks(text: string, max = 3900): string[] {
@@ -81,16 +80,13 @@ bot.command('start', async (ctx) => {
     .row()
     .text('✅ Я уже купил сервер', 'bought');
 
-  const promo = hostPromo();
   await ctx.reply(
     'Привет! 👋\n\n' +
       'Здесь ты за пару минут получишь свой VPN-сервер и бота, через которого сможешь ' +
       'продавать VPN за ⭐️ Telegram Stars.\n\n' +
       '━━━━━━━━━━━━━━\n' +
       'Всего три шага:\n' +
-      '1. Купить сервер у хостинга — «Как купить сервер», там всё по шагам' +
-      (promo ? ' (и неделя бесплатно по промокоду)' : '') +
-      '.\n' +
+      '1. Купить сервер у хостинга — «Как купить сервер», там всё по шагам. Первые 7 дней можно бесплатно.\n' +
       '2. Прислать мне IP и пароль сервера и токен бота — к каждому покажу, где взять.\n' +
       '3. Нажать «Поднять VPN» — дальше я всё сделаю сам.\n\n' +
       '⚠️ При покупке обязательно отметь «Выделенный IP» (~50–65 ₽). Без него сервер спрятан ' +
@@ -186,9 +182,7 @@ bot.command('help', async (ctx) => {
     '\n/nosay <id> — исключить узел из рассылок' +
     '\n/setup — как идёт настройка оплаты картой у владельцев и где они спотыкаются' +
     '\n/funnel [дней] — воронка: докуда дошли, кто ушёл и где, кто с первого раза' +
-    '\n/chat @ник [строк] — диалог человека со станком в обе стороны' +
-    '\n/promo <код|off> — промокод хостинга в инструкции покупки' +
-    '\n/bonus <текст|off> — свой текст блока «Как сэкономить»';
+    '\n/chat @ник [строк] — диалог человека со станком в обе стороны';
   await ctx.reply(config.adminIds.includes(ctx.from?.id ?? -1) ? base + admin : base);
 });
 
@@ -243,31 +237,6 @@ bot.command('chat', async (ctx) => {
       steps.map((s) => `${s.created_at.slice(5, 16)} ${s.step} ${s.detail ?? ''}`).join('\n');
   }
   for (const part of chunks(text)) await ctx.reply(part);
-});
-
-// Промокод хостинга и блок бонусов — меняются из чата, без деплоя (см. host-guide.ts).
-bot.command('promo', async (ctx) => {
-  if (!config.adminIds.includes(ctx.from?.id ?? -1)) return;
-  const arg = (ctx.match ?? '').trim();
-  if (!arg) {
-    await ctx.reply(`Промокод сейчас: ${hostPromo() ?? 'не задан'}\n\n/promo КОД — задать · /promo off — убрать`);
-    return;
-  }
-  kvSet(PROMO_KEY, arg === 'off' ? null : arg);
-  await ctx.reply('Готово. Так теперь выглядит инструкция покупки:\n\n' + buyGuideText());
-});
-
-bot.command('bonus', async (ctx) => {
-  if (!config.adminIds.includes(ctx.from?.id ?? -1)) return;
-  const arg = (ctx.match ?? '').trim();
-  if (!arg) {
-    await ctx.reply(
-      'Сейчас блок такой:\n\n' + savingsText() + '\n\n/bonus <текст> — свой текст (строки с «• ») · /bonus off — вернуть стандартный',
-    );
-    return;
-  }
-  kvSet(BONUS_KEY, arg === 'off' ? null : arg);
-  await ctx.reply('Готово:\n\n' + savingsText());
 });
 
 bot.command('nodes', async (ctx) => {

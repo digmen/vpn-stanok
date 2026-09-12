@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import type { Api } from 'grammy';
+import type { Api, InlineKeyboard } from 'grammy';
 
 /**
  * Рассылка владельцам с возможностью отката.
@@ -52,12 +52,13 @@ export async function broadcast(
   api: Api,
   chatIds: number[],
   text: string,
+  kb?: InlineKeyboard,
 ): Promise<{ record: BroadcastRecord; failed: number[] }> {
   const sent: SentMsg[] = [];
   const failed: number[] = [];
   for (const chatId of chatIds) {
     try {
-      const m = await api.sendMessage(chatId, text);
+      const m = await api.sendMessage(chatId, text, kb ? { reply_markup: kb } : undefined);
       sent.push({ chatId, messageId: m.message_id });
     } catch {
       // Заблокировал бота, удалил чат — не повод ронять всю рассылку.

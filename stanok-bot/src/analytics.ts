@@ -109,6 +109,27 @@ function ago(ms: number): string {
   return h < 48 ? `${h} ч назад` : `${Math.round(h / 24)} дн. назад`;
 }
 
+/**
+ * Кому слать приглашение «протестируй VPN на бесплатном сервере» (/invite): заходили, но до
+ * сервера, который ответил, не дошли. У кого сервер уже отвечал — дело не в покупке, им это
+ * приглашение не по адресу. Кто нажал «Не напоминать» — не пишем никогда.
+ */
+export function inviteTargets(excludeIds: number[] = []): UserState[] {
+  const withNode = new Set(
+    (db.prepare(`SELECT DISTINCT tg_user_id id FROM nodes WHERE status = 'ready'`).all() as { id: number }[]).map((r) => r.id),
+  );
+  const beforeServer = new Set<FunnelStep>(['start', 'bought_click', 'setup_click', 'ip_ok']);
+  return loadUserStates().filter(
+    (u) =>
+      !u.off &&
+      u.failsBeforeOk === null &&
+      u.best !== null &&
+      beforeServer.has(u.best) &&
+      !withNode.has(u.id) &&
+      !excludeIds.includes(u.id),
+  );
+}
+
 /** Текст для /funnel. Окно — по дате прихода человека. */
 export function funnelReport(days = 30, now = Date.now()): string {
   const from = now - days * 24 * 3600_000;
