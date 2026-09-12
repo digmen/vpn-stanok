@@ -166,11 +166,14 @@ export async function testFromRussia(vlessLink: string, waitMs = 6000): Promise<
     }
     return { ok: true, detail: `подключение и передача данных из РФ в порядке, вышел через ${ip}, ~${Math.round(speed)} байт/с` };
   } catch (e) {
-    return {
-      ok: false,
-      inconclusive: true,
-      detail: 'RU-проба не смогла даже подключиться к тестовому серверу: ' + (e instanceof Error ? e.message : String(e)),
-    };
+    // 🔴 Не e.message: у execFile там ВСЯ команда целиком — вместе с конфигом клиента и его
+    // ключом (uuid). Этот текст уходит в тревогу в Telegram. Поймано 12.09 на живом сбое.
+    const err = e as { killed?: boolean; code?: number | string; stderr?: string };
+    const why = err.killed
+      ? 'не уложилась по времени — тестовый сервер в РФ отвечает слишком медленно'
+      : `ssh завершился с кодом ${err.code ?? '?'}` +
+        (err.stderr ? `: ${String(err.stderr).trim().split('\n').slice(-1)[0].slice(0, 120)}` : '');
+    return { ok: false, inconclusive: true, detail: `RU-проба не выполнилась (${why})` };
   }
 }
 
