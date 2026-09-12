@@ -12,7 +12,8 @@
     "report": "tsx scripts/report.ts",
     "pull-events": "tsx scripts/pull-events.ts",
     "push-seller": "tsx scripts/push-seller.ts",
-    "test": "node --experimental-vm-modules ./node_modules/jest/bin/jest.js"
+    "test": "node --experimental-vm-modules ./node_modules/jest/bin/jest.js",
+    "support": "tsx src/support/main.ts"
   },
   "dependencies": {
     "@grammyjs/conversations": "^1.2.0",

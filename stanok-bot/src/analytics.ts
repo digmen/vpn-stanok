@@ -149,6 +149,20 @@ export function funnelReport(days = 30, now = Date.now()): string {
     lines.push(`${STEP_LABEL[s]} — ${reached(s)}`);
     if (s === 'start' && buyOpen) lines.push(`   открыли «Как купить» — ${buyOpen}`);
   }
+  // Вход через канал: сколько попросили подписаться, сколько подписались, сколько не проверить.
+  const sub = (step: string) =>
+    (
+      db
+        .prepare(`SELECT COUNT(DISTINCT tg_user_id) c FROM events WHERE step = ? AND created_at >= datetime(?, 'unixepoch')`)
+        .get(step, Math.floor(from / 1000)) as { c: number }
+    ).c;
+  const [asked, subOk, subUnknown] = [sub('sub_prompt'), sub('sub_ok'), sub('sub_unknown')];
+  if (asked || subOk || subUnknown) {
+    lines.push('', `📢 Канал: просили подписаться ${asked} · подписались ${subOk}` + (subUnknown ? ` · не проверить ${subUnknown}` : ''));
+  }
+  const support = sub('support_msg');
+  if (support) lines.push(`🆘 Писали в поддержку: ${support}`);
+
   const ok = users.filter((u) => u.failsBeforeOk !== null);
   const clean = ok.filter((u) => u.failsBeforeOk === 0).length;
   lines.push('', `С первого раза, без единой ошибки: ${clean} из ${ok.length}`);

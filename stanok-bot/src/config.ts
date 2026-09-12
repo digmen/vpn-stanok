@@ -60,4 +60,9 @@ export const config = {
     host: process.env.RU_PROBE_HOST ?? '',
     sshKeyPath: process.env.RU_PROBE_SSH_KEY_PATH ?? '',
   },
+  // Бот техподдержки — отдельный процесс (src/support/main.ts) на той же базе. Пусто → не запускается.
+  supportBotToken: process.env.SUPPORT_BOT_TOKEN ?? '',
+  supportBotUrl: process.env.SUPPORT_BOT_URL ?? 'https://t.me/VPNForgeSupport_bot',
+  // Канал владельца: подписка — вход в станок (см. channel.ts). Пусто → без проверки.
+  channel: process.env.CHANNEL ?? '@DigmenDevLogs',
 };

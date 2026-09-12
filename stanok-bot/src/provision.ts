@@ -346,10 +346,12 @@ export async function provisionNode(
     // Подробности целиком получаем мы — в тревоге ниже и в сохранённом логе.
     // С неверным паролем кнопка «Попробовать снова» бесполезна — он у нас тот же.
     const auth = isAuthFailure(msg);
+    const failKb = auth ? new InlineKeyboard() : retryKb;
+    if (config.supportBotToken) failKb.row().url('🆘 Поддержка', config.supportBotUrl + '?start=install');
     await show(
       `❌ Не получилось довести настройку.\n\n${humanInstallError(msg)}` +
         (auth ? '' : '\n\nЗаново вводить ничего не нужно — только нажать кнопку.'),
-      auth ? undefined : retryKb,
+      failKb,
     );
     await notifyAdmins(
       api,

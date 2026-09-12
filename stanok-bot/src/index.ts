@@ -24,6 +24,7 @@ import { chatTranscript, clearSecretWait, logIncoming, logOutgoing, pruneChatLog
 import { funnelReport } from './analytics.js';
 import { runNudges } from './nudges.js';
 import { buyGuideText } from './host-guide.js';
+import { channelUrl, checkSubscribed, passedGate } from './channel.js';
 
 /** Telegram режет сообщения на 4096 символах — длинные отчёты шлём кусками по строкам. */
 function chunks(text: string, max = 3900): string[] {
@@ -73,28 +74,91 @@ bot.use(createConversation(onboarding));
 bot.use(createConversation(updateToken));
 
 // ── Шаг 1: купить сервер ────────────────────────────────────────────────
-bot.command('start', async (ctx) => {
-  logEvent(ctx.from!, 'start');
+function startKeyboard(): InlineKeyboard {
   const kb = new InlineKeyboard()
     .text('🛒 Как купить сервер', 'buy')
     .row()
     .text('✅ Я уже купил сервер', 'bought');
+  if (config.supportBotToken) kb.row().url('🆘 Поддержка', config.supportBotUrl + '?start=stanok');
+  return kb;
+}
 
+const START_TEXT =
+  'Привет! 👋\n\n' +
+  'Здесь ты за пару минут получишь свой VPN-сервер и бота, через которого сможешь ' +
+  'продавать VPN за ⭐️ Telegram Stars.\n\n' +
+  '━━━━━━━━━━━━━━\n' +
+  'Всего три шага:\n' +
+  '1. Купить сервер у хостинга — «Как купить сервер», там всё по шагам. Первые 7 дней можно бесплатно.\n' +
+  '2. Прислать мне IP и пароль сервера и токен бота — к каждому покажу, где взять.\n' +
+  '3. Нажать «Поднять VPN» — дальше я всё сделаю сам.\n\n' +
+  '⚠️ При покупке обязательно отметь «Выделенный IP» (~50–65 ₽). Без него сервер спрятан ' +
+  'за NAT хостинга — ни я не смогу его настроить, ни клиенты не подключатся. ' +
+  'Это причина 9 из 10 неудач.\n\n' +
+  'Сервер уже есть — жми «Я уже купил сервер».';
+
+// Вход через подписку на канал (см. channel.ts). true — можно дальше. Иначе показали просьбу
+// подписаться с кнопкой «Я подписался», которая вернёт человека ровно туда, куда он шёл (next).
+let gateAlertAt = 0;
+async function gate(ctx: MyContext, next: 'start' | 'bought' | 'setup'): Promise<boolean> {
+  const from = ctx.from;
+  if (!from || !config.channel || passedGate(from.id)) return true;
+  const st = await checkSubscribed(ctx.api, from.id);
+  if (st === 'yes') {
+    logEvent(from, 'sub_ok');
+    return true;
+  }
+  if (st === 'unknown') {
+    // Станок не админ канала — не блокируем, но админу сообщаем (раз в сутки).
+    logEvent(from, 'sub_unknown');
+    if (Date.now() - gateAlertAt > 24 * 3600_000) {
+      gateAlertAt = Date.now();
+      void notifyAdmins(
+        ctx.api,
+        `📢 Не могу проверить подписку на ${config.channel}: станок не админ канала. Добавь @${ctx.me.username} ` +
+          'в админы канала (права не нужны) — пока пропускаю всех без проверки.',
+      );
+    }
+    return true;
+  }
+  logEvent(from, 'sub_prompt', next);
   await ctx.reply(
-    'Привет! 👋\n\n' +
-      'Здесь ты за пару минут получишь свой VPN-сервер и бота, через которого сможешь ' +
-      'продавать VPN за ⭐️ Telegram Stars.\n\n' +
-      '━━━━━━━━━━━━━━\n' +
-      'Всего три шага:\n' +
-      '1. Купить сервер у хостинга — «Как купить сервер», там всё по шагам. Первые 7 дней можно бесплатно.\n' +
-      '2. Прислать мне IP и пароль сервера и токен бота — к каждому покажу, где взять.\n' +
-      '3. Нажать «Поднять VPN» — дальше я всё сделаю сам.\n\n' +
-      '⚠️ При покупке обязательно отметь «Выделенный IP» (~50–65 ₽). Без него сервер спрятан ' +
-      'за NAT хостинга — ни я не смогу его настроить, ни клиенты не подключатся. ' +
-      'Это причина 9 из 10 неудач.\n\n' +
-      'Сервер уже есть — жми «Я уже купил сервер».',
-    { reply_markup: kb },
+    '📢 Перед началом — подпишись на мой канал ' + config.channel + '.\n\n' +
+      'Там я пишу, как устроен этот VPN, что нового в боте и что делать, если что-то сломалось.\n\n' +
+      'Подписался — жми «Я подписался».',
+    {
+      reply_markup: new InlineKeyboard()
+        .url('📢 Подписаться', channelUrl())
+        .row()
+        .text('✅ Я подписался', 'subcheck:' + next),
+    },
   );
+  return false;
+}
+
+bot.command('start', async (ctx) => {
+  logEvent(ctx.from!, 'start');
+  if (!(await gate(ctx, 'start'))) return;
+  await ctx.reply(START_TEXT, { reply_markup: startKeyboard() });
+});
+
+bot.callbackQuery(/^subcheck:(start|bought|setup)$/, async (ctx) => {
+  const next = ctx.match[1] as 'start' | 'bought' | 'setup';
+  const st = await checkSubscribed(ctx.api, ctx.from.id);
+  if (st === 'no') {
+    logEvent(ctx.from, 'sub_fail');
+    await ctx.answerCallbackQuery({ text: 'Пока не вижу подписки. Открой канал, нажми «Подписаться» и вернись сюда.', show_alert: true });
+    return;
+  }
+  await ctx.answerCallbackQuery();
+  logEvent(ctx.from, st === 'yes' ? 'sub_ok' : 'sub_unknown');
+  if (next === 'start') {
+    await ctx.editMessageText(START_TEXT, { reply_markup: startKeyboard() }).catch(() => {});
+  } else if (next === 'bought') {
+    await showStep2(ctx);
+  } else {
+    await enterSetup(ctx);
+  }
 });
 
 // Пошаговая покупка + бонусы хостинга (см. host-guide.ts). 'instr' — кнопка старых сообщений.
@@ -126,9 +190,7 @@ bot.callbackQuery('nudge_off', async (ctx) => {
 });
 
 // ── Шаг 2: настроить ────────────────────────────────────────────────────
-bot.callbackQuery('bought', async (ctx) => {
-  await ctx.answerCallbackQuery();
-  logEvent(ctx.from, 'bought_click');
+async function showStep2(ctx: MyContext): Promise<void> {
   const kb = new InlineKeyboard().text('⚙️ Настроить', 'setup');
   // Морфим то же сообщение в Шаг 2 — чат не засоряется
   await ctx.editMessageText(
@@ -142,15 +204,28 @@ bot.callbackQuery('bought', async (ctx) => {
       'Жми «Настроить».',
     { reply_markup: kb },
   );
+}
+
+async function enterSetup(ctx: MyContext): Promise<void> {
+  await ctx.deleteMessage().catch(() => {}); // убираем сообщение Шага 2, чтобы не висело
+  // «Продолжить настройку» из напоминания может прийти, пока висит старый мастер.
+  if (Object.keys(await ctx.conversation.active()).length > 0) await ctx.conversation.exit();
+  await ctx.conversation.enter('onboarding');
+}
+
+// ── Шаг 2: настроить ────────────────────────────────────────────────────
+bot.callbackQuery('bought', async (ctx) => {
+  await ctx.answerCallbackQuery();
+  logEvent(ctx.from, 'bought_click');
+  if (!(await gate(ctx, 'bought'))) return;
+  await showStep2(ctx);
 });
 
 bot.callbackQuery('setup', async (ctx) => {
   await ctx.answerCallbackQuery();
   logEvent(ctx.from, 'setup_click');
-  await ctx.deleteMessage().catch(() => {}); // убираем сообщение Шага 2, чтобы не висело
-  // «Продолжить настройку» из напоминания может прийти, пока висит старый мастер.
-  if (Object.keys(await ctx.conversation.active()).length > 0) await ctx.conversation.exit();
-  await ctx.conversation.enter('onboarding');
+  if (!(await gate(ctx, 'setup'))) return;
+  await enterSetup(ctx);
 });
 
 // ── Провижининг: поднять VPN ────────────────────────────────────────────

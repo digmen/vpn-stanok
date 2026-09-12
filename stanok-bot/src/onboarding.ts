@@ -202,6 +202,7 @@ async function ipThatAnswers(
     await track('preflight_fail', `${ip} · ${res.reason}`);
 
     const kb = new InlineKeyboard().text('🔄 Проверить снова', 'pf:retry').text('✏️ Другой IP', 'pf:new');
+    if (config.supportBotToken) kb.row().url('🆘 Поддержка', config.supportBotUrl + '?start=preflight');
     await ctx.api
       .editMessageText(ctx.chat!.id, statusMsg.message_id, preflightMessage(ip, res.reason), { reply_markup: kb })
       .catch(() => {});

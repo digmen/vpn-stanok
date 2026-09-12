@@ -71,7 +71,16 @@ export type SideStep =
   | 'password_wrong'
   // 13.09: напоминание застрявшему (detail = вид) и отказ от напоминаний (см. nudges.ts).
   | 'nudge'
-  | 'nudge_off';
+  | 'nudge_off'
+  // 13.09: вход через подписку на канал (см. channel.ts). prompt — показали просьбу,
+  // ok — подписан, fail — нажал «Я подписался», а подписки нет, unknown — проверить не смогли
+  // (станок не админ канала), пропустили без блокировки.
+  | 'sub_prompt'
+  | 'sub_ok'
+  | 'sub_fail'
+  | 'sub_unknown'
+  // 13.09: написал в бота техподдержки (detail = номер обращения) — см. support/.
+  | 'support_msg';
 
 export interface EventRow {
   id: number;
