@@ -19,7 +19,27 @@ import { onboarding, updateToken, type MyContext } from './onboarding.js';
 import { provisionNode } from './provision.js';
 import { notifyAdmins } from './admin.js';
 import { checkNodeAlive } from './ssh.js';
-import { hadRecentEvent, logEvent } from './events.js';
+import { hadRecentEvent, logEvent, userTimeline } from './events.js';
+import { chatTranscript, clearSecretWait, logIncoming, logOutgoing, pruneChatLog, resolveUser } from './chat-log.js';
+import { funnelReport } from './analytics.js';
+import { runNudges } from './nudges.js';
+import { BONUS_KEY, PROMO_KEY, buyGuideText, hostPromo, savingsText } from './host-guide.js';
+import { kvSet } from './kv.js';
+
+/** Telegram режет сообщения на 4096 символах — длинные отчёты шлём кусками по строкам. */
+function chunks(text: string, max = 3900): string[] {
+  const out: string[] = [];
+  let cur = '';
+  for (const line of text.split('\n')) {
+    if (cur.length + line.length + 1 > max && cur) {
+      out.push(cur);
+      cur = '';
+    }
+    cur += (cur ? '\n' : '') + (line.length > max ? line.slice(0, max) : line);
+  }
+  if (cur) out.push(cur);
+  return out;
+}
 import { isValidBotToken } from './validate.js';
 import { decrypt } from './crypto.js';
 import { collectSetup, formatSetupReport } from './setup-report.js';
@@ -29,8 +49,27 @@ import { broadcast, lastBroadcast, undoLast } from './broadcast.js';
 
 const bot = new Bot<MyContext>(config.botToken);
 
+// Журнал диалога (см. chat-log.ts): всё, что бот отправляет, и всё, что приходит.
+// Трансформер ставится ДО старта — grammY копирует его в api каждого апдейта.
+bot.api.config.use(logOutgoing);
+bot.use(logIncoming);
+
 bot.use(session({ initial: () => ({}) }));
 bot.use(conversations());
+
+// Команда посреди мастера настройки выводит из мастера.
+// 🔴 13.09: раньше мастер съедал любое сообщение как ответ на свой шаг — /start на шаге IP
+// получал «это не похоже на IP», и выхода из мастера не было вовсе, кроме как угадать
+// правильный ответ. Люди так и уходили.
+bot.use(async (ctx, next) => {
+  if (ctx.message?.text?.startsWith('/')) {
+    const active = await ctx.conversation.active();
+    if (Object.keys(active).length > 0) await ctx.conversation.exit();
+    if (ctx.from) clearSecretWait(ctx.from.id);
+  }
+  await next();
+});
+
 bot.use(createConversation(onboarding));
 bot.use(createConversation(updateToken));
 
@@ -38,31 +77,34 @@ bot.use(createConversation(updateToken));
 bot.command('start', async (ctx) => {
   logEvent(ctx.from!, 'start');
   const kb = new InlineKeyboard()
-    .url('🛒 Купить сервер', config.referralLink)
+    .text('🛒 Как купить сервер', 'buy')
     .row()
-    .text('📄 Подробная инструкция', 'instr')
-    .row()
-    .text('✅ Я купил сервер', 'bought');
+    .text('✅ Я уже купил сервер', 'bought');
 
+  const promo = hostPromo();
   await ctx.reply(
     'Привет! 👋\n\n' +
       'Здесь ты за пару минут получишь свой VPN-сервер и бота, через которого сможешь ' +
       'продавать VPN за ⭐️ Telegram Stars.\n\n' +
       '━━━━━━━━━━━━━━\n' +
-      '📍 Шаг 1. Купи сервер\n' +
-      'Нажми «Купить сервер», выбери Ubuntu — и обязательно отметь галочку «Выделенный IP».\n\n' +
-      '⚠️ Про выделенный IP без шуток: он стоит ~50–65 ₽, и без него ничего не заработает. ' +
-      'Сервер без него спрятан за NAT хостинга — ни я не смогу его настроить, ни твои клиенты ' +
-      'не подключатся к VPN. Это причина 9 из 10 неудач.\n\n' +
-      'Хочешь пошагово, с видео — жми «Подробная инструкция».\n' +
-      'Купил? Жми «Я купил сервер».',
+      'Всего три шага:\n' +
+      '1. Купить сервер у хостинга — «Как купить сервер», там всё по шагам' +
+      (promo ? ' (и неделя бесплатно по промокоду)' : '') +
+      '.\n' +
+      '2. Прислать мне IP и пароль сервера и токен бота — к каждому покажу, где взять.\n' +
+      '3. Нажать «Поднять VPN» — дальше я всё сделаю сам.\n\n' +
+      '⚠️ При покупке обязательно отметь «Выделенный IP» (~50–65 ₽). Без него сервер спрятан ' +
+      'за NAT хостинга — ни я не смогу его настроить, ни клиенты не подключатся. ' +
+      'Это причина 9 из 10 неудач.\n\n' +
+      'Сервер уже есть — жми «Я уже купил сервер».',
     { reply_markup: kb },
   );
 });
 
-bot.callbackQuery('instr', async (ctx) => {
-  await ctx.answerCallbackQuery();
-  logEvent(ctx.from, 'instr_open');
+// Пошаговая покупка + бонусы хостинга (см. host-guide.ts). 'instr' — кнопка старых сообщений.
+async function showBuyGuide(ctx: MyContext): Promise<void> {
+  await ctx.answerCallbackQuery().catch(() => {});
+  if (ctx.from) logEvent(ctx.from, 'buy_open');
   if (config.videos.buy) {
     try {
       await ctx.replyWithVideo(config.videos.buy);
@@ -70,17 +112,21 @@ bot.callbackQuery('instr', async (ctx) => {
       /* file_id недоступен */
     }
   }
-  await ctx.reply(
-    'Коротко:\n' +
-      '1. Жми «Купить сервер».\n' +
-      '2. Выбери тариф с системой Ubuntu.\n' +
-      '3. ⚠️ Отметь «Выделенный IP» — это отдельная услуга за ~50–65 ₽, и она обязательна. ' +
-      'Без неё сервер снаружи не виден: ни настроить, ни раздать VPN не получится.\n' +
-      '4. Оплати картой с телефона.\n' +
-      '5. Вернись сюда и жми «Я купил сервер».\n\n' +
-      'Если сервер уже куплен без выделенного IP — не страшно: услугу можно добавить ' +
-      'в панели к существующему серверу.',
-  );
+  await ctx.reply(buyGuideText(), {
+    reply_markup: new InlineKeyboard()
+      .url('🌐 Открыть хостинг', config.referralLink)
+      .row()
+      .text('✅ Я купил сервер', 'bought'),
+  });
+}
+bot.callbackQuery('buy', showBuyGuide);
+bot.callbackQuery('instr', showBuyGuide);
+
+bot.callbackQuery('nudge_off', async (ctx) => {
+  await ctx.answerCallbackQuery();
+  logEvent(ctx.from, 'nudge_off');
+  await ctx.editMessageReplyMarkup({ reply_markup: new InlineKeyboard() }).catch(() => {});
+  await ctx.reply('Хорошо, больше не напоминаю. Захочешь продолжить — /start.');
 });
 
 // ── Шаг 2: настроить ────────────────────────────────────────────────────
@@ -106,6 +152,8 @@ bot.callbackQuery('setup', async (ctx) => {
   await ctx.answerCallbackQuery();
   logEvent(ctx.from, 'setup_click');
   await ctx.deleteMessage().catch(() => {}); // убираем сообщение Шага 2, чтобы не висело
+  // «Продолжить настройку» из напоминания может прийти, пока висит старый мастер.
+  if (Object.keys(await ctx.conversation.active()).length > 0) await ctx.conversation.exit();
   await ctx.conversation.enter('onboarding');
 });
 
@@ -136,7 +184,11 @@ bot.command('help', async (ctx) => {
     '\n\n/say <текст> — рассылка владельцам (сначала покажу список получателей)' +
     '\n/undo — откатить последнюю рассылку' +
     '\n/nosay <id> — исключить узел из рассылок' +
-    '\n/setup — как идёт настройка оплаты картой у владельцев и где они спотыкаются';
+    '\n/setup — как идёт настройка оплаты картой у владельцев и где они спотыкаются' +
+    '\n/funnel [дней] — воронка: докуда дошли, кто ушёл и где, кто с первого раза' +
+    '\n/chat @ник [строк] — диалог человека со станком в обе стороны' +
+    '\n/promo <код|off> — промокод хостинга в инструкции покупки' +
+    '\n/bonus <текст|off> — свой текст блока «Как сэкономить»';
   await ctx.reply(config.adminIds.includes(ctx.from?.id ?? -1) ? base + admin : base);
 });
 
@@ -155,6 +207,67 @@ bot.command('setup', async (ctx) => {
   const rows = await collectSetup();
   await ctx.api.deleteMessage(ctx.chat.id, wait.message_id).catch(() => {});
   await ctx.reply(formatSetupReport(rows));
+});
+
+// Воронка (только админ): докуда дошли, кто ушёл и где, кто с первого раза (см. analytics.ts).
+bot.command('funnel', async (ctx) => {
+  if (!config.adminIds.includes(ctx.from?.id ?? -1)) return;
+  const days = Number((ctx.match ?? '').trim()) || 30;
+  for (const part of chunks(funnelReport(days))) await ctx.reply(part);
+});
+
+// Диалог одного человека со станком (только админ): /chat @nick [строк].
+// Журнал диалога ведётся с 13.09 — у тех, кто был раньше, показываем хотя бы шаги.
+bot.command('chat', async (ctx) => {
+  if (!config.adminIds.includes(ctx.from?.id ?? -1)) return;
+  const [who, n] = (ctx.match ?? '').trim().split(/\s+/);
+  if (!who) {
+    await ctx.reply('/chat @ник [сколько строк, по умолчанию 60]');
+    return;
+  }
+  const id = resolveUser(who);
+  if (!id) {
+    await ctx.reply(`${who}: такого в журналах нет.`);
+    return;
+  }
+  const rows = chatTranscript(id, Number(n) || 60);
+  let text: string;
+  if (rows.length > 0) {
+    text =
+      `💬 Диалог ${who} (👤 — он, 🤖 — бот):\n\n` +
+      rows.map((r) => `${r.created_at.slice(5, 16)} ${r.dir === 'in' ? '👤' : '🤖'} ${r.text ?? ''}`).join('\n\n');
+  } else {
+    const steps = userTimeline(String(id));
+    text =
+      `${who}: диалога в журнале нет (он пишется с 13.09). Шаги:\n\n` +
+      steps.map((s) => `${s.created_at.slice(5, 16)} ${s.step} ${s.detail ?? ''}`).join('\n');
+  }
+  for (const part of chunks(text)) await ctx.reply(part);
+});
+
+// Промокод хостинга и блок бонусов — меняются из чата, без деплоя (см. host-guide.ts).
+bot.command('promo', async (ctx) => {
+  if (!config.adminIds.includes(ctx.from?.id ?? -1)) return;
+  const arg = (ctx.match ?? '').trim();
+  if (!arg) {
+    await ctx.reply(`Промокод сейчас: ${hostPromo() ?? 'не задан'}\n\n/promo КОД — задать · /promo off — убрать`);
+    return;
+  }
+  kvSet(PROMO_KEY, arg === 'off' ? null : arg);
+  await ctx.reply('Готово. Так теперь выглядит инструкция покупки:\n\n' + buyGuideText());
+});
+
+bot.command('bonus', async (ctx) => {
+  if (!config.adminIds.includes(ctx.from?.id ?? -1)) return;
+  const arg = (ctx.match ?? '').trim();
+  if (!arg) {
+    await ctx.reply(
+      'Сейчас блок такой:\n\n' + savingsText() + '\n\n/bonus <текст> — свой текст (строки с «• ») · /bonus off — вернуть стандартный',
+    );
+    return;
+  }
+  kvSet(BONUS_KEY, arg === 'off' ? null : arg);
+  await ctx.reply('Готово:\n\n' + savingsText());
 });
 
 bot.command('nodes', async (ctx) => {
@@ -506,6 +619,14 @@ async function backupOwnersData(): Promise<void> {
 }
 setInterval(() => void backupOwnersData(), 24 * 60 * 60 * 1000);
 void backupOwnersData(); // первый заход сразу при старте
+
+// Напоминания застрявшим и узлам перед концом оплаченной недели (см. nudges.ts — правила).
+setInterval(() => void runNudges(bot.api).catch((e) => console.error('Напоминания:', e)), 15 * 60 * 1000);
+setTimeout(() => void runNudges(bot.api).catch((e) => console.error('Напоминания:', e)), 60 * 1000);
+
+// Журнал диалога — разбор, а не архив.
+setInterval(() => pruneChatLog(), 24 * 60 * 60 * 1000);
+pruneChatLog();
 
 await bot.start({
   onStart: (info) => console.log(`Станок-бот @${info.username} запущен`),

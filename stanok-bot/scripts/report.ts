@@ -9,6 +9,8 @@
  *   добавь --json, чтобы получить машинный вывод
  */
 import { dropReasons, funnel, recentUsers, userTimeline } from '../src/events.js';
+import { chatTranscript, resolveUser } from '../src/chat-log.js';
+import { funnelReport } from '../src/analytics.js';
 
 const args = process.argv.slice(2).filter((a) => a !== '--json');
 const json = process.argv.includes('--json');
@@ -61,6 +63,17 @@ if (cmd === 'funnel') {
     console.log('Причины отвала:\n');
     for (const r of rows) console.log(`  ${String(r.times).padStart(4)}×  ${r.step.padEnd(16)} ${r.detail ?? ''}`);
   });
+} else if (cmd === 'summary') {
+  // То же, что /funnel в боте: докуда дошли, кто ушёл и где, кто с первого раза.
+  console.log(funnelReport(Number(arg ?? 30)));
+} else if (cmd === 'chat') {
+  if (!arg) throw new Error('нужен @username или telegram id');
+  const id = resolveUser(arg);
+  const rows = id ? chatTranscript(id, Number(args[2] ?? 200)) : [];
+  out(rows, () => {
+    if (rows.length === 0) console.log(`${arg}: диалога в журнале нет (пишется с 13.09.2026)`);
+    for (const r of rows) console.log(`${r.created_at} ${r.dir === 'in' ? '👤' : '🤖'} ${r.text ?? ''}\n`);
+  });
 } else {
-  console.log('Команды: funnel | user <@nick|id> | recent [n] | drops   [--json]');
+  console.log('Команды: funnel | summary [дней] | user <@nick|id> | chat <@nick|id> [n] | recent [n] | drops   [--json]');
 }

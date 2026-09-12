@@ -5,10 +5,11 @@ import { decrypt, encrypt } from './crypto.js';
 import { demoteNode, findNodeByIpOfOtherUser, getAllNodes, getPrimaryNodeAny, getPrimaryReadyNode, setReplacedNodeId, setSellerTokenForUser, upsertNode } from './db.js';
 import { notifyAdmins } from './admin.js';
 import { logEvent, type FunnelStep, type SideStep } from './events.js';
-import { checkSshPort, preflightMessage } from './preflight.js';
+import { checkSshLogin, checkSshPort, preflightMessage } from './preflight.js';
 import { verifyBotToken } from './bot-token.js';
 import { updateSellerToken } from './deploy-seller.js';
-import { checkIp, ipProblemMessage, isNonEmptySecret, isValidBotToken } from './validate.js';
+import { checkIp, extractIpv4, ipProblemMessage, isNonEmptySecret, isValidBotToken, notIpMessage } from './validate.js';
+import { clearSecretWait, markSecretWait, type SecretKind } from './chat-log.js';
 
 export type MyContext = Context & ConversationFlavor;
 export type MyConversation = Conversation<MyContext>;
@@ -33,11 +34,18 @@ async function askStep(
   opts: {
     video: string;
     prompt: string;
-    validate: (s: string) => string | null;
+    /** attempt — сколько раз уже отказали на этом шаге (0 — первая попытка). */
+    validate: (s: string, attempt: number) => string | null;
     onReject?: (input: string) => Promise<void>;
+    /** Привести ввод к делу до проверки (например, вытащить IP из «root@1.2.3.4:22»). */
+    normalize?: (s: string) => string;
+    /** Ответ на этом шаге — секрет: в журнал диалога он не попадёт (см. chat-log.ts). */
+    secret?: SecretKind;
   },
 ): Promise<string> {
   let errId: number | undefined;
+  let attempt = 0;
+  const uid = ctx.from!.id;
   for (;;) {
     let videoId: number | undefined;
     if (opts.video) {
@@ -48,8 +56,11 @@ async function askStep(
       }
     }
     const promptMsg = await ctx.reply(opts.prompt);
+    if (opts.secret) await conversation.external(() => markSecretWait(uid, opts.secret!));
     const answer = await conversation.waitFor('message:text');
-    const text = answer.message!.text.trim();
+    if (opts.secret) await conversation.external(() => clearSecretWait(uid));
+    const raw = answer.message!.text.trim();
+    const text = opts.normalize ? opts.normalize(raw) : raw;
 
     if (videoId) await del(ctx, videoId);
     await del(ctx, promptMsg.message_id);
@@ -59,8 +70,9 @@ async function askStep(
       errId = undefined;
     }
 
-    const err = opts.validate(text);
+    const err = opts.validate(text, attempt);
     if (err === null) return text;
+    attempt++;
     if (opts.onReject) await opts.onReject(text);
     errId = (await ctx.reply(err)).message_id;
   }
@@ -146,8 +158,10 @@ async function askIp(
     prompt:
       '1️⃣ Пришли IP-адрес сервера.\n' +
       'Его видно в панели хостинга, в карточке твоего сервера — четыре числа через точку.',
-    validate: (s) => {
+    normalize: (s) => extractIpv4(s) ?? s,
+    validate: (s, attempt) => {
       const problem = checkIp(s);
+      if (problem === 'not_ip') return notIpMessage(s, attempt + 1);
       if (problem) return ipProblemMessage(problem);
       const taken = findNodeByIpOfOtherUser(s.trim(), tgUserId);
       if (taken) {
@@ -199,7 +213,8 @@ async function ipThatAnswers(
     if (data === 'pf:new' || (!data && upd.message?.text)) {
       // «Другой IP» или человек просто прислал новый адрес сообщением
       await track('newip_click');
-      const typed = upd.message?.text?.trim();
+      const rawTyped = upd.message?.text?.trim();
+      const typed = rawTyped ? (extractIpv4(rawTyped) ?? rawTyped) : undefined;
       if (typed && checkIp(typed) === null && !findNodeByIpOfOtherUser(typed, tgUserId)) {
         await del(ctx, upd.message!.message_id);
         ip = typed;
@@ -341,12 +356,33 @@ export async function onboarding(conversation: MyConversation, ctx: MyContext) {
   const ip = await ipThatAnswers(conversation, ctx, from.id, track);
   const protocol = NEW_NODE_PROTOCOL;
 
-  const rootPassword = await askStep(conversation, ctx, {
-    video: config.videos.password,
-    prompt: '2️⃣ Пришли root-пароль сервера (из панели хостинга или письма).\n⚠️ Хранится зашифрованно.',
-    validate: (s) =>
-      isNonEmptySecret(s) ? null : '❌ Пароль пустой или слишком короткий. Пришли ещё раз:',
-  });
+  // Пароль проверяем на сервере сразу, а не после «Поднять VPN» (см. preflight.ts::checkSshLogin).
+  let passwordPrompt =
+    '2️⃣ Пришли root-пароль сервера.\n' +
+    'Он в письме от хостинга после покупки и в панели, в карточке сервера. Копируй целиком, без пробелов по краям.\n' +
+    '⚠️ Хранится зашифрованно.';
+  let rootPassword: string;
+  for (;;) {
+    rootPassword = await askStep(conversation, ctx, {
+      video: config.videos.password,
+      prompt: passwordPrompt,
+      secret: 'password',
+      validate: (s) =>
+        isNonEmptySecret(s) ? null : '❌ Пароль пустой или слишком короткий. Пришли ещё раз:',
+    });
+    const checking = await ctx.reply('🔐 Проверяю пароль на сервере…');
+    const pw = rootPassword;
+    const verdict = await conversation.external(() => checkSshLogin(ip, pw));
+    await del(ctx, checking.message_id);
+    if (verdict !== 'bad_password') break;
+    await track('password_wrong'); // сам пароль в журнал не попадает — только факт
+    passwordPrompt =
+      '❌ Сервер не принял этот пароль.\n\n' +
+      'Частые причины: скопирован с лишним символом, взят от личного кабинета хостинга, а не от сервера, ' +
+      'или сервер переустанавливали — тогда пароль новый. Нужен именно root-пароль сервера: ' +
+      'он в письме после покупки и в панели, в карточке сервера. Если не найти — там же можно его сбросить.\n\n' +
+      'Пришли root-пароль ещё раз:';
+  }
   await track('password_ok'); // сам пароль в журнал не попадает — только факт
 
   // Токен бота-продавца у владельца всегда ОДИН (он один раз завёл его в BotFather) —

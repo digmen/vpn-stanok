@@ -15,7 +15,7 @@ import { testFromRussia, viaRelay } from './ru-probe.js';
 import { enableRelay } from './relay.js';
 import { humanInstallError } from './install-error.js';
 import { notifyAdmins } from './admin.js';
-import { checkSshPort, preflightMessage } from './preflight.js';
+import { checkSshPort, isAuthFailure, preflightMessage } from './preflight.js';
 import { logEvent } from './events.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -344,10 +344,12 @@ export async function provisionNode(
     // Владельцу — не сырой вывод скрипта, а что с этим делать: «tput: No value for $TERM»
     // четыре раза подряд (#21, 11.09) говорит ему только «всё сломано», и он уходит.
     // Подробности целиком получаем мы — в тревоге ниже и в сохранённом логе.
+    // С неверным паролем кнопка «Попробовать снова» бесполезна — он у нас тот же.
+    const auth = isAuthFailure(msg);
     await show(
-      `❌ Не получилось довести настройку.\n\n${humanInstallError(msg)}\n\n` +
-        'Заново вводить ничего не нужно — только нажать кнопку.',
-      retryKb,
+      `❌ Не получилось довести настройку.\n\n${humanInstallError(msg)}` +
+        (auth ? '' : '\n\nЗаново вводить ничего не нужно — только нажать кнопку.'),
+      auth ? undefined : retryKb,
     );
     await notifyAdmins(
       api,

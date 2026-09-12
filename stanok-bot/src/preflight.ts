@@ -1,4 +1,5 @@
 import net from 'node:net';
+import { NodeSSH } from 'node-ssh';
 import { SSH } from './constants.js';
 
 // Проверка «а есть ли вообще куда стучаться», ДО того как просить у человека root-пароль.
@@ -38,6 +39,39 @@ export function checkSshPort(
     });
     socket.connect(port, host);
   });
+}
+
+/** Сервер отверг логин именно из-за пароля (а не сеть моргнула). */
+export function isAuthFailure(message: string): boolean {
+  return /All configured authentication methods failed|Authentication failed|permission denied/i.test(message);
+}
+
+/**
+ * Пускает ли сервер с этим паролем — сразу, как человек его прислал.
+ *
+ * 🔴 13.09, журнал станка: двое прислали неверный root-пароль, узнали об этом только
+ * после «Поднять VPN», а в ответ получили «заново вводить ничего не нужно — только нажми
+ * кнопку». Жали её по три раза с тем же паролем, пока не ушли. Теперь неверный пароль
+ * ловится на своём шаге и переспрашивается там же.
+ * 'unknown' — не смогли проверить (сеть, таймаут): человека не держим, решит установка.
+ */
+export async function checkSshLogin(host: string, password: string): Promise<'ok' | 'bad_password' | 'unknown'> {
+  const ssh = new NodeSSH();
+  try {
+    await ssh.connect({
+      host,
+      username: SSH.USERNAME,
+      password,
+      port: SSH.PORT,
+      readyTimeout: 20_000,
+      tryKeyboard: true,
+    });
+    return 'ok';
+  } catch (e) {
+    return isAuthFailure(e instanceof Error ? e.message : String(e)) ? 'bad_password' : 'unknown';
+  } finally {
+    ssh.dispose();
+  }
 }
 
 // Текст для человека: что именно не так и что с этим делать. Без слова «таймаут».
