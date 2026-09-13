@@ -28,3 +28,9 @@ data/
 # OS / editor
 .DS_Store
 Thumbs.db
+
+# Рабочие копии ОТДЕЛЬНЫХ приватных репозиториев (кастом под одного владельца),
+# физически лежат рядом на диске — не часть истории этого репо.
+seller-bot-alexander/
+seller-bot-ramazan/
+seller-bot-ramazan-repo/
