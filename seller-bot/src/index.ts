@@ -111,6 +111,9 @@ const PROMPT_TTL_MS = 180_000;
 const awaitingPromo = new Map<number, number>();
 
 const isOwner = (id?: number): boolean => id !== undefined && id === getOwnerId();
+// Узкий доступ: только /stats и /campaigns, ничего из остального кабинета
+// (см. config.ts::statsViewerIds — по умолчанию пусто на всех узлах).
+const canViewStats = (id?: number): boolean => isOwner(id) || (id !== undefined && config.statsViewerIds.has(String(id)));
 const expired = (): boolean => pending !== null && Date.now() - pending.at > PROMPT_TTL_MS;
 
 function ask(kind: PendingKind, arg?: string): InlineKeyboard {
@@ -956,7 +959,7 @@ bot.command('subs', async (ctx) => {
 // Метки на ссылке (?start=luna-trial) — сколько перешло, сколько взяли пробник,
 // сколько купили. /campaigns — список всех меток; /campaigns <метка> — разбор одной.
 bot.command('campaigns', async (ctx) => {
-  if (!isOwner(ctx.from?.id)) return;
+  if (!canViewStats(ctx.from?.id)) return;
   const tag = (ctx.match ?? '').trim();
   if (tag) {
     const r = campaignReport(tag);
@@ -978,7 +981,7 @@ bot.command('campaigns', async (ctx) => {
 });
 
 bot.command('stats', async (ctx) => {
-  if (!isOwner(ctx.from?.id)) return;
+  if (!canViewStats(ctx.from?.id)) return;
   await ctx.reply(await buildStats());
 });
 
