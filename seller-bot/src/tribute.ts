@@ -4,6 +4,7 @@ import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { config } from './config.js';
 import { getSettings } from './settings.js';
+import { handleSubscriptionRequest } from './subscription.js';
 
 /**
  * Приём оплаты картой и СБП через Tribute (tribute.tg) — рядом со звёздами Telegram.
@@ -309,9 +310,13 @@ function certVersion(files: { cert: string; key: string }): string {
 export function syncTributeServer(onEvent?: TributeEventHandler, onBadSignature?: (s: TributeStatus) => void): void {
   if (onEvent) handler = onEvent;
   if (onBadSignature) onIssue = onBadSignature;
-  const s = getSettings().tribute;
   const files = certFiles();
-  const want = s.enabled && s.apiKey !== null && files !== null && handler !== null;
+  // 🔴 13.09: сервер теперь нужен не только Tribute — на нём же отдаётся подписка
+  // клиенту (см. subscription.ts). Раньше сервер вообще не поднимался, пока
+  // владелец не включил оплату картой, и подписка была бы недоступна без
+  // причины, ей самой не связанной. Условие для Tribute-логики внутри осталось —
+  // непонятая ссылка на /tribute по-прежнему получит 404, если карта не настроена.
+  const want = files !== null;
 
   if (!want) {
     if (server) {
@@ -330,7 +335,16 @@ export function syncTributeServer(onEvent?: TributeEventHandler, onBadSignature?
   certStamp = stamp;
 
   server = createServer({ cert: readFileSync(files.cert), key: readFileSync(files.key) }, (req, res) => {
-    if (req.method !== 'POST') {
+    // Подписка клиента — не Tribute, работает всегда, независимо от того, включена
+    // ли у владельца оплата картой (см. subscription.ts).
+    if (req.method === 'GET' && req.url?.startsWith('/sub/')) {
+      const token = req.url.slice('/sub/'.length).split('?')[0];
+      void handleSubscriptionRequest(req, res, decodeURIComponent(token));
+      return;
+    }
+
+    const s = getSettings().tribute;
+    if (req.method !== 'POST' || !s.enabled || s.apiKey === null || !handler) {
       res.writeHead(404).end();
       return;
     }

@@ -44,6 +44,7 @@ import { attachServer, ping } from './ssh.js';
 import { claimOwnerIfUnset, getOwnerId } from './owner.js';
 import { readOwnerConfig, saveOwnerConfig } from './owner-config.js';
 import { buildStats, recordEvent } from './stats.js';
+import { buildSubStats, subscriptionToken, subscriptionUrl } from './subscription.js';
 import { hasUsedTrial, markTrialUsed, trialCount } from './trials.js';
 import { checkUpdate, currentVersion, startSelfUpdate } from './update.js';
 import { logSetup } from './setup-log.js';
@@ -339,6 +340,18 @@ async function deliverPurchase(opts: {
     { userId, username: opts.username, stars: opts.stars },
   );
   await offerConfigs(bot.api, userId, peers.map((p) => ({ config: p.config, title: p.locTitle, protocol: p.protocol })));
+  // Подписка — один URL на все локации сразу (см. subscription.ts). Доступна только там,
+  // где у узла есть свой домен+сертификат (vless_ws_tls); на amneziawg/vless_reality
+  // без домена подписку взять неоткуда — молча пропускаем, отдельные ключи выше уже ушли.
+  const subToken = peers.find((p) => p.protocol === 'vless_ws_tls')?.pubkey;
+  if (subToken && config.nodeDomain) {
+    await bot.api
+      .sendMessage(
+        userId,
+        `🔗 Или подписка одной ссылкой (для приложений, которые её понимают — держит список серверов актуальным сам):\n${subscriptionUrl(config.nodeDomain, config.tributeWebhookPort, subToken)}`,
+      )
+      .catch(() => {});
+  }
   if (bonusDays > 0) {
     await bot.api.sendMessage(userId, `🤝 К сроку добавлено ${bonusDays} дн. за приглашённых друзей.`).catch(() => {});
   }
@@ -920,6 +933,13 @@ bot.callbackQuery('free', async (ctx) => {
       '⚠️ Не выдал конфиг для: ' + failed.map((f) => `${f.title} (${f.reason})`).join(', '),
     );
   }
+});
+
+// Телеметрия подписки (см. subscription.ts): кто реально ей пользуется, без веб-панели —
+// его прямая просьба 13.09: «сделаем через тг бота, функция для админов такая специальная».
+bot.command('subs', async (ctx) => {
+  if (!isOwner(ctx.from?.id)) return;
+  await ctx.reply(buildSubStats());
 });
 
 bot.command('stats', async (ctx) => {
