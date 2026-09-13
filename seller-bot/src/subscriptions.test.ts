@@ -9,7 +9,7 @@ import path from 'node:path';
 process.env.SELLER_BOT_TOKEN ??= '1:test';
 process.env.DATA_DIR ??= fs.mkdtempSync(path.join(os.tmpdir(), 'seller-test-'));
 
-const { normalizeSub } = await import('./subscriptions.js');
+const { normalizeSub, addSubscriptionHours, clientsByTerm } = await import('./subscriptions.js');
 const { PRIMARY_LOCATION_ID, isValidHost, parseHostPort } = await import('./locations.js');
 const { promoEnabled } = await import('./branding.js');
 
@@ -111,4 +111,32 @@ test('битый адрес с портом отбрасывается', () => {
   assert.equal(parseHostPort('999.1.1.1:22'), null);
   assert.equal(parseHostPort(':22'), null);
   assert.equal(parseHostPort('не адрес'), null);
+});
+
+test('clientsByTerm: группирует действующих клиентов по сроку, дорогие тарифы первыми', () => {
+  const now = Date.now();
+  addSubscriptionHours([{ loc: 'local', pubkey: 'T30A' }], 30 * 24, { stars: 100 });
+  addSubscriptionHours([{ loc: 'local', pubkey: 'T30B' }], 30 * 24, { stars: 100 });
+  addSubscriptionHours([{ loc: 'local', pubkey: 'T7' }], 7 * 24, { stars: 30 });
+  addSubscriptionHours([{ loc: 'local', pubkey: 'TRIAL' }], 6); // пробный, часы
+
+  const byTerm = clientsByTerm(now);
+  const t30 = byTerm.find((t) => t.term === '30 дн.');
+  const t7 = byTerm.find((t) => t.term === '7 дн.');
+  const trial = byTerm.find((t) => t.term === '6 ч.');
+  assert.ok(t30 && t7 && trial);
+  assert.equal(t30!.count, 2);
+  assert.equal(t30!.stars, 200);
+  assert.equal(t7!.count, 1);
+  assert.equal(trial!.count, 1);
+  assert.equal(trial!.stars, 0);
+  // сортировка: 30 дн. раньше 7 дн., 7 дн. раньше пробного (часы)
+  assert.ok(byTerm.indexOf(t30!) < byTerm.indexOf(t7!));
+  assert.ok(byTerm.indexOf(t7!) < byTerm.indexOf(trial!));
+});
+
+test('clientsByTerm: истёкшие в группировку не попадают', () => {
+  addSubscriptionHours([{ loc: 'local', pubkey: 'EXPIRED_TERM' }], -1, { stars: 999 });
+  const byTerm = clientsByTerm();
+  assert.equal(byTerm.some((t) => t.stars === 999), false);
 });

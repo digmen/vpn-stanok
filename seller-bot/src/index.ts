@@ -23,7 +23,7 @@ import {
   takeBanked,
 } from './referrals.js';
 import { createVpnPeer, createVpnPeerAt, createVpnPeersEverywhere, revokePeerAt, type Peer } from './vpn.js';
-import { activeClients, addSubscription, addSubscriptionHours, extendForUser, getExpiredPeers, removePeer, revenueStars } from './subscriptions.js';
+import { activeClients, addSubscription, addSubscriptionHours, clientsByTerm, extendForUser, getExpiredPeers, removePeer, revenueStars } from './subscriptions.js';
 import { APPS, offerConfig, offerConfigs, registerDeliveryHandlers } from './delivery.js';
 import {
   addRemote,
@@ -739,9 +739,15 @@ bot.callbackQuery('clients', async (ctx) => {
   if (!isOwner(ctx.from?.id)) return;
   const rows = activeClients();
   const money = revenueStars();
+  const byTerm = clientsByTerm();
+  const termBlock = byTerm.length
+    ? '\nПо срокам:\n' + byTerm.map((t) => `  ${t.term} — ${t.count} чел.${t.stars ? ` (${t.stars} ⭐)` : ''}`).join('\n') + '\n'
+    : '';
   const head =
     `👥 Клиенты\n\nАктивных подписок: ${rows.length}\n` +
-    `Заработано всего: ${money.total} ⭐ (в действующих: ${money.active} ⭐)\n\n`;
+    `Заработано всего: ${money.total} ⭐ (в действующих: ${money.active} ⭐)\n` +
+    termBlock +
+    '\n';
   const list =
     rows.length === 0
       ? 'Пока никто не купил.'

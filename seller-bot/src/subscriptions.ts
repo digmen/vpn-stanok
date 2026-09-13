@@ -235,6 +235,25 @@ export function activeClients(now = Date.now()): ClientRow[] {
     }));
 }
 
+/** Сколько людей купили каждый срок — «на сколько купили» одним взглядом,
+ *  а не построчным списком. Только ДЕЙСТВУЮЩИЕ подписки (истёкшие в subs.json
+ *  не хранятся вечно — их чистит getExpiredPeers/removePeer). */
+export function clientsByTerm(now = Date.now()): { term: string; count: number; stars: number }[] {
+  const groups = new Map<string, { count: number; stars: number }>();
+  for (const s of read().filter((s) => s.expiresAt > now)) {
+    const term = s.days ? `${s.days} дн.` : s.hours ? `${s.hours} ч.` : 'без срока';
+    const g = groups.get(term) ?? { count: 0, stars: 0 };
+    g.count++;
+    g.stars += s.stars ?? 0;
+    groups.set(term, g);
+  }
+  // По убыванию срока в днях/часах — сначала длинные тарифы, пробные (часы) в конце.
+  const rank = (t: string) => (t.includes('дн.') ? Number(t) * 24 : t.includes('ч.') ? Number(t) : -1);
+  return [...groups.entries()]
+    .map(([term, g]) => ({ term, ...g }))
+    .sort((a, b) => rank(b.term) - rank(a.term));
+}
+
 export function revenueStars(now = Date.now()): { total: number; active: number } {
   const subs = read();
   return {
