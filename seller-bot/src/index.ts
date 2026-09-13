@@ -45,6 +45,7 @@ import { claimOwnerIfUnset, getOwnerId } from './owner.js';
 import { readOwnerConfig, saveOwnerConfig } from './owner-config.js';
 import { buildStats, recordEvent } from './stats.js';
 import { buildSubStats, subscriptionToken, subscriptionUrl } from './subscription.js';
+import { allCampaignTags, campaignReport, isCampaignTag, recordCampaignTouch } from './campaigns.js';
 import { hasUsedTrial, markTrialUsed, trialCount } from './trials.js';
 import { checkUpdate, currentVersion, startSelfUpdate } from './update.js';
 import { logSetup } from './setup-log.js';
@@ -199,16 +200,20 @@ async function showMenu(ctx: any): Promise<void> {
 bot.command('start', async (ctx) => {
   pending = null;
   claimOwnerIfUnset(ctx.from!.id);
+  const payload = ctx.match as string | undefined;
+  const me = ctx.from!.id;
   // Реферальная ссылка вида /start r<id>. Привязка молчаливая, если она уже была —
   // человек не должен видеть «ты приглашён» на каждый /start.
-  const inviter = parseCode(ctx.match as string | undefined);
-  const me = ctx.from!.id;
+  const inviter = parseCode(payload);
   if (inviter !== null && bindReferral(me, inviter, { isOwner: isOwner(me) })) {
     await ctx.reply(
       '👋 Ты пришёл по приглашению. Ничего делать не нужно — просто выбери тариф. ' +
         'Тому, кто тебя позвал, за твою первую покупку добавится время.',
     );
   }
+  // Метка партнёра/канала (`?start=luna-trial`) — не реферальный код, отслеживаем
+  // отдельно, только первый вход по каждой метке (см. campaigns.ts).
+  if (isCampaignTag(payload)) recordCampaignTouch(payload, me);
   await showMenu(ctx);
 });
 
@@ -329,7 +334,7 @@ async function deliverPurchase(opts: {
   // пиры тому, кто сам ничего не покупал, значит раздавать бесплатный VPN за приглашения.
   const bonusDays = takeBanked(userId);
   const days = (pkg?.days ?? config.days) + bonusDays;
-  recordEvent({ type: 'paid', stars: opts.stars, userId });
+  recordEvent({ type: 'paid', stars: opts.stars, userId, days });
   // Платный тариф даёт доступ ко ВСЕМ локациям — ровно то, о чём просил франчайзи:
   // «покупает на месяц, а ему доступен Лондон, Финляндия».
   const peers = await generateEverywhere(bot.api, userId);
@@ -946,6 +951,30 @@ bot.callbackQuery('free', async (ctx) => {
 bot.command('subs', async (ctx) => {
   if (!isOwner(ctx.from?.id)) return;
   await ctx.reply(buildSubStats());
+});
+
+// Метки на ссылке (?start=luna-trial) — сколько перешло, сколько взяли пробник,
+// сколько купили. /campaigns — список всех меток; /campaigns <метка> — разбор одной.
+bot.command('campaigns', async (ctx) => {
+  if (!isOwner(ctx.from?.id)) return;
+  const tag = (ctx.match ?? '').trim();
+  if (tag) {
+    const r = campaignReport(tag);
+    await ctx.reply(
+      `🔗 ${r.tag}\n\nПерешло: ${r.starts}\nВзяли пробник: ${r.trials}\nКупили подписку: ${r.purchases}`,
+    );
+    return;
+  }
+  const tags = allCampaignTags();
+  if (tags.length === 0) {
+    await ctx.reply('Переходов по меткам ещё не было.\n\nСсылка вида: https://t.me/<бот>?start=<метка>');
+    return;
+  }
+  const lines = tags.map((t) => {
+    const r = campaignReport(t);
+    return `• ${r.tag} — перешло ${r.starts}, пробник ${r.trials}, купили ${r.purchases}`;
+  });
+  await ctx.reply(`🔗 Метки переходов:\n\n${lines.join('\n')}\n\nПодробнее: /campaigns <метка>`);
 });
 
 bot.command('stats', async (ctx) => {
