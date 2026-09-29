@@ -94,6 +94,17 @@ export async function deploySeller(opts: DeployOpts): Promise<void> {
       { cwd: remoteDir },
     );
     if (start.code !== 0) throw new Error('pm2 не запустил бота: ' + (start.stderr || start.stdout).slice(0, 300));
+
+    // 7. Автозапуск pm2 при ребуте сервера (systemd-юнит).
+    //
+    // 🔴 29.09, живой инцидент (узел #30, @Kupil_I_baluetsa): этого шага не было вообще —
+    // `pm2 save` фиксирует список процессов на диске, но без `pm2 startup` его некому
+    // прочитать после перезагрузки: сам демон pm2 не поднимается, пока его не запустит
+    // systemd. Сервер узла ушёл в плановый ребут (обновление ядра) 27.09, и seller-bot
+    // молчал почти двое суток, пока клиент не пожаловался сам — мониторинг это заметил
+    // (см. checkNodeAlive), но чинить не умел, только слал алерт. Идемпотентно, безопасно
+    // звать повторно на уже настроенных узлах — `pm2 startup` только создаёт юнит.
+    await ssh.execCommand('pm2 startup systemd -u root --hp /root >/dev/null 2>&1; pm2 save');
   } finally {
     ssh.dispose();
   }
@@ -140,6 +151,9 @@ export async function updateSellerToken(host: string, password: string, token: s
       `cd ${REMOTE.SELLER_DIR}`,
       // Процесс мог быть остановлен (мы сами гасим его при мёртвом токене) — restart поднимет.
       'pm2 restart seller-bot --update-env >/dev/null 2>&1 || pm2 start npm --name seller-bot -- start >/dev/null 2>&1',
+      // На случай если узел деплоился до 29.09 (см. deploySeller) и автозапуска pm2 при
+      // ребуте у него ещё нет — чиним заодно, раз уж всё равно на сервере.
+      'pm2 startup systemd -u root --hp /root >/dev/null 2>&1; pm2 save >/dev/null 2>&1',
       // Проверка №2: бот реально ЖИВЁТ, а не крутится в цикле падений. Смотрим счётчик
       // перезапусков дважды с паузой: если он растёт — процесс падает и поднимается заново.
       'STAT() { pm2 jlist 2>/dev/null | node -e \'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const a=JSON.parse(s).find(x=>x.name==="seller-bot");process.stdout.write(a?a.pm2_env.status+" "+a.pm2_env.restart_time:"none 0")}catch(e){process.stdout.write("none 0")}})\'; }',

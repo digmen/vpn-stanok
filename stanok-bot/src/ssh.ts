@@ -130,7 +130,18 @@ export async function checkNodeAlive(
       // несуществующее имя процесса, само по себе это ничего не доказывает.
       const pidRes = await ssh.execCommand('pm2 pid seller-bot');
       if (!/^\d+$/.test(pidRes.stdout.trim())) {
-        return { ok: false, detail: 'процесс seller-bot не запущен (pm2 pid пуст)' };
+        // 🔴 29.09, живой инцидент (узел #30): процесс пропадал из pm2 целиком после
+        // ребута сервера, потому что `pm2 startup` при деплое не звался — мониторинг
+        // это видел раз в 30 минут и только слал алерт, чинить не пытался. Клиент узнал
+        // о простое раньше, чем сработал алерт. Раз мы уже на сервере — пробуем поднять
+        // сами (dump с прошлого деплоя должен быть на диске) и настроить автозапуск на
+        // будущее, и только если это не помогло — сообщаем как раньше.
+        await ssh.execCommand('pm2 resurrect >/dev/null 2>&1 || (cd /root/seller-bot && pm2 start npm --name seller-bot -- start >/dev/null 2>&1)');
+        await ssh.execCommand('pm2 startup systemd -u root --hp /root >/dev/null 2>&1; pm2 save >/dev/null 2>&1');
+        const retryPid = await ssh.execCommand('pm2 pid seller-bot');
+        if (!/^\d+$/.test(retryPid.stdout.trim())) {
+          return { ok: false, detail: 'процесс seller-bot не запущен (pm2 pid пуст, самовосстановление не помогло)' };
+        }
       }
     }
 
