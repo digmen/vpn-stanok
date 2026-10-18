@@ -15,6 +15,7 @@ import {
 } from './db.js';
 import { TOKEN_INVALID_HELP, verifyBotToken } from './bot-token.js';
 import { stopSellerBot } from './deploy-seller.js';
+import { kvGet, kvSet } from './kv.js';
 import { onboarding, updateToken, type MyContext } from './onboarding.js';
 import { provisionNode } from './provision.js';
 import { notifyAdmins } from './admin.js';
@@ -600,8 +601,9 @@ async function monitorSellerTokens(): Promise<void> {
     const verdict = await verifyBotToken(decrypt(n.seller_token_enc));
     if (verdict.ok || verdict.reason === 'network') continue;
 
-    // Раз в сутки на владельца, а не на каждом проходе — состояние в БД, переживает рестарт.
-    if (hadRecentEvent(n.tg_user_id, 'token_invalid', 24)) continue;
+    // Раз в неделю на владельца, а не на каждом проходе и не каждый день: пока токен мёртв,
+    // ежедневное одно и то же — шум. Состояние в БД, переживает рестарт.
+    if (hadRecentEvent(n.tg_user_id, 'token_invalid', 24 * 7)) continue;
     logEvent({ id: n.tg_user_id, username: n.tg_username ?? undefined }, 'token_invalid', `узел #${n.id}, монитор`);
 
     // Гасим падающий процесс: с мёртвым токеном он всё равно бесполезен, а CPU жрёт.
@@ -657,8 +659,16 @@ void collectRevenue(); // первый заход сразу при старте
 // До этого дня такого бэкапа не было вообще — восстанавливать было НЕЧЕГО.
 async function backupOwnersData(): Promise<void> {
   const r = await backupAllPrimaries();
+  // Шлём только когда набор проблемных узлов изменился: одно и то же каждый день — шум,
+  // из-за которого настоящая новая поломка тонет. Подпись хранится в kv, переживает рестарт.
+  const sig = r.failures.map((f) => f.split(' ')[0]).sort().join(',');
+  const prev = kvGet('backup_fail_sig') ?? '';
+  if (sig === prev) return;
+  kvSet('backup_fail_sig', sig || null);
   if (r.failures.length > 0) {
     await notifyAdmins(bot.api, `⚠️ Суточный бэкап настроек: ${r.ok} ок, ${r.fail} не удалось:\n${r.failures.join('\n')}`);
+  } else {
+    await notifyAdmins(bot.api, `✅ Суточный бэкап настроек: все ${r.ok} узлов снова в порядке.`);
   }
 }
 setInterval(() => void backupOwnersData(), 24 * 60 * 60 * 1000);
