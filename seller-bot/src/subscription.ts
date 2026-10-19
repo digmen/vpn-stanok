@@ -10,6 +10,8 @@ import { findLocation, getClientEndpoint, type Location } from './locations.js';
 import { withVlessHostPort } from './parse.js';
 import { runScript } from './ssh.js';
 import { PEER_SCRIPT_TIMEOUT_MS } from './constants.js';
+import { getSettings } from './settings.js';
+import { readState, subUsage, userinfoHeader } from './traffic.js';
 
 // Подписка: один URL на клиента, за которым — все его действующие ключи сразу
 // (по одному на локацию). Владелец добавляет/меняет/гасит локации в любой момент —
@@ -195,7 +197,15 @@ export async function handleSubscriptionRequest(req: IncomingMessage, res: Serve
     const links = await subscriptionLinks(sub);
     recordSubAccess({ token, ts: Date.now(), ok: true, links: links.length });
     const body = Buffer.from(links.join('\n'), 'utf8').toString('base64');
-    res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' }).end(body);
+    // Стандартный заголовок подписок: приложение показывает расход, лимит и дату окончания.
+    res
+      .writeHead(200, {
+        'content-type': 'text/plain; charset=utf-8',
+        'cache-control': 'no-store',
+        'subscription-userinfo': userinfoHeader(subUsage(readState(), sub), getSettings().traffic.limitGb, sub.expiresAt),
+        'profile-update-interval': '1',
+      })
+      .end(body);
   } catch (e) {
     console.error('Ошибка отдачи подписки:', e);
     if (!res.headersSent) res.writeHead(500).end();

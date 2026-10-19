@@ -40,6 +40,8 @@ export interface Settings {
     products: { pkgId: string; productId: string; url: string; label: string }[];
   };
   welcome: { text: string | null; photo: string | null };
+  /** Месячный лимит трафика на клиента, ГБ. 0 = без лимита (см. traffic.ts). */
+  traffic: { limitGb: number };
 }
 
 /** Доля от срока друга, которую получает пригласивший. Верхняя граница не 100:
@@ -59,6 +61,11 @@ export const LIMITS = {
   MAX_DAYS: 3650,
   MAX_WELCOME_LEN: 800,
 } as const;
+
+/** Лимит трафика в ГБ: 0 — выключен, иначе целое число до 100 000. */
+export function isValidLimitGb(n: number): boolean {
+  return Number.isInteger(n) && n >= 0 && n <= 100_000;
+}
 
 export function isValidStars(n: number): boolean {
   return Number.isInteger(n) && n >= 1 && n <= LIMITS.MAX_STARS;
@@ -111,6 +118,7 @@ function fresh(): Settings {
     reminder: { enabled: true, days: 2 },
     tribute: { enabled: false, apiKey: null, products: [] },
     welcome: { text: null, photo: null },
+    traffic: { limitGb: 0 },
   };
 }
 
@@ -171,6 +179,7 @@ export function normalize(raw: unknown): Settings {
             }))
         : [],
     },
+    traffic: { limitGb: isValidLimitGb(Number(r.traffic?.limitGb)) ? Number(r.traffic!.limitGb) : 0 },
     welcome: {
       text: typeof r.welcome?.text === 'string' ? r.welcome.text.slice(0, LIMITS.MAX_WELCOME_LEN) : null,
       photo: typeof r.welcome?.photo === 'string' ? r.welcome.photo : null,

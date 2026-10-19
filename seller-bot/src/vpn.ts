@@ -6,6 +6,7 @@ import { PEER_SCRIPT_TIMEOUT_MS } from './constants.js';
 import { extractClientConfig, withEndpointHost, withVlessHost, withVlessHostPort, withVlessName } from './parse.js';
 import { allLocations, findLocation, getClientEndpoint, PRIMARY_LOCATION_ID, type Location, type VpnProtocol } from './locations.js';
 import { runScript } from './ssh.js';
+import { parseTrafficLines } from './traffic.js';
 
 const execFileP = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -145,4 +146,38 @@ export async function revokePeerAt(locId: string, pubkey: string): Promise<void>
     return;
   }
   await runScript(loc.remote!, revokeScript, [pubkey], 30_000);
+}
+
+const TRAFFIC_SCRIPT = path.resolve(__dirname, '../scripts/traffic-vless-ws-tls.sh');
+
+/** Возвращает ранее отозванный ключ (тот же uuid) — после блокировки за лимит трафика.
+ *  Только для VLESS+WS+TLS: у других протоколов блокировки по лимиту нет. */
+export async function restorePeerAt(locId: string, pubkey: string): Promise<void> {
+  const loc = findLocation(locId);
+  if (!loc || loc.protocol !== 'vless_ws_tls') return;
+  const script = SCRIPTS.vless_ws_tls.add;
+  if (loc.kind === 'local') {
+    await execFileP('bash', [script, pubkey], { timeout: 30_000 });
+    return;
+  }
+  await runScript(loc.remote!, script, [pubkey], 30_000);
+}
+
+/** Приращения трафика по клиентам со всех WS+TLS-локаций с прошлого замера.
+ *  Упавшая локация пропускается (её счётчики не сбрасываются и придут со следующим замером). */
+export async function collectTrafficDeltas(): Promise<{ uuid: string; up: number; down: number }[]> {
+  const all: { uuid: string; up: number; down: number }[] = [];
+  for (const loc of allLocations()) {
+    if (loc.protocol !== 'vless_ws_tls') continue;
+    try {
+      const stdout =
+        loc.kind === 'local'
+          ? (await execFileP('bash', [TRAFFIC_SCRIPT], { timeout: 30_000 })).stdout
+          : await runScript(loc.remote!, TRAFFIC_SCRIPT, [], 30_000);
+      all.push(...parseTrafficLines(stdout));
+    } catch (e) {
+      console.error('Замер трафика не удался на', loc.id, shortError(e));
+    }
+  }
+  return all;
 }

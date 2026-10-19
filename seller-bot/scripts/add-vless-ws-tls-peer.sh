@@ -19,12 +19,14 @@ PORT="$(jq -r --arg t "$TAG" '.inbounds[] | select(.tag==$t) | .port' "$XRAY_CON
 DOMAIN="$(jq -r --arg t "$TAG" '.inbounds[] | select(.tag==$t) | .streamSettings.tlsSettings.serverName' "$XRAY_CONF")"
 WS_PATH="$(jq -r --arg t "$TAG" '.inbounds[] | select(.tag==$t) | .streamSettings.wsSettings.path' "$XRAY_CONF")"
 
-UUID="$(uuidgen)"
+# Необязательный аргумент — вернуть клиента с УЖЕ выданным uuid (после блокировки за лимит трафика):
+# ссылка у человека остаётся прежней. uuid берём из /proc: uuidgen есть не на всех дистрибутивах.
+UUID="${1:-$(cat /proc/sys/kernel/random/uuid)}"
 
 # flow (xtls-rprx-vision) здесь НЕ указывается — он существует только для TCP+Reality/TLS.
 # С WebSocket-транспортом клиент с flow не подключится вообще.
 jq --arg uuid "$UUID" --arg t "$TAG" \
-  '(.inbounds[] | select(.tag==$t) | .settings.clients) += [{id: $uuid, email: $uuid}]' \
+  '(.inbounds[] | select(.tag==$t) | .settings.clients) |= (if any(.[]; .id == $uuid) then . else . + [{id: $uuid, email: $uuid}] end)' \
   "$XRAY_CONF" > "${XRAY_CONF}.tmp"
 mv "${XRAY_CONF}.tmp" "$XRAY_CONF"
 
