@@ -11,6 +11,7 @@ export const REMOTE = {
   SELLER_DIR: '/root/seller-bot',
   SELLER_DATA_DIR: '/root/seller-bot-data', // изменяемое состояние; НЕ стирается при обновлении кода
   NODE_SETUP_URL: 'https://deb.nodesource.com/setup_22.x',
+  NODE_SETUP_URL_RPM: 'https://rpm.nodesource.com/setup_22.x',
 } as const;
 
 // Маркеры, между которыми install-скрипт печатает клиентский конфиг.

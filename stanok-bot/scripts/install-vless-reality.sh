@@ -31,31 +31,95 @@ REALITY_PORT=443
 # время на него снова.
 DEST="addons.mozilla.org"
 
+# >>> distro-lib (одинаковый блок в install-vless-*.sh; сверяет scripts/distro-lib.test.ts)
+# Любой серверный Linux с systemd: Debian/Ubuntu и производные (Astra, Mint, Kali…),
+# RHEL-семейство (Alma, Rocky, CentOS Stream, RHEL, Oracle, Fedora, Amazon Linux),
+# openSUSE/SLES, Arch. Без systemd (Alpine, контейнер без init) Xray-install не работает —
+# говорим об этом сразу и понятно, а не падаем в середине.
+[ "$(id -u)" = "0" ] || { echo "нужны права root" >&2; exit 1; }
+[ -d /run/systemd/system ] || {
+  echo "на сервере нет systemd (Alpine или контейнер) — Xray здесь не поставить. Нужен обычный VPS: Ubuntu, Debian, AlmaLinux, Rocky, CentOS, Fedora, openSUSE или Arch." >&2
+  exit 1
+}
+OS_ID="unknown"; OS_LIKE=""
+if [ -r /etc/os-release ]; then OS_ID="$(. /etc/os-release; echo "${ID:-unknown}")"; OS_LIKE="$(. /etc/os-release; echo "${ID_LIKE:-}")"; fi
+
+# Менеджер пакетов определяем по тому, что реально есть, а не по имени дистрибутива:
+# так работают и неизвестные производные.
+if   command -v apt-get >/dev/null 2>&1; then PM=apt
+elif command -v dnf     >/dev/null 2>&1; then PM=dnf
+elif command -v yum     >/dev/null 2>&1; then PM=yum
+elif command -v zypper  >/dev/null 2>&1; then PM=zypper
+elif command -v pacman  >/dev/null 2>&1; then PM=pacman
+else echo "не нашёл менеджер пакетов (apt/dnf/yum/zypper/pacman) — система $OS_ID не поддерживается" >&2; exit 1
+fi
+echo "система: $OS_ID, менеджер пакетов: $PM" >&2
 export DEBIAN_FRONTEND=noninteractive
 
-# Та же грабля, что и в install-amneziawg.sh: свежий VPS первые минуты держит
-# dpkg-lock под unattended-upgrades.
-wait_for_apt() {
+# Свежий VPS первые минуты занят фоновым обновлением (apt: unattended-upgrades держит
+# dpkg-lock; dnf/yum: dnf-automatic/packagekit; zypper: zypp.pid).
+wait_for_pm() {
   local waited=0 max=600
   while :; do
-    if command -v fuser >/dev/null 2>&1; then
-      fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock >/dev/null 2>&1 || break
-    else
-      pgrep -f 'unattended-upgrade|apt-get|/usr/bin/dpkg' >/dev/null 2>&1 || break
-    fi
+    case "$PM" in
+      apt)
+        if command -v fuser >/dev/null 2>&1; then
+          fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock >/dev/null 2>&1 || break
+        else
+          pgrep -f 'unattended-upgrade|apt-get|/usr/bin/dpkg' >/dev/null 2>&1 || break
+        fi ;;
+      dnf|yum) pgrep -x 'dnf|yum|packagekitd' >/dev/null 2>&1 || break ;;
+      zypper)  [ -e /run/zypp.pid ] && kill -0 "$(cat /run/zypp.pid 2>/dev/null)" 2>/dev/null || break ;;
+      *) break ;;
+    esac
     if [ "$waited" -ge "$max" ]; then
-      echo "apt/dpkg занят другим процессом дольше ${max}с — подожди 5-10 минут и запусти снова." >&2
+      echo "менеджер пакетов занят другим процессом дольше ${max}с — подожди 5-10 минут и запусти снова." >&2
       exit 1
     fi
-    echo "apt занят фоновым обновлением системы, жду… (${waited}с)" >&2
+    echo "менеджер пакетов занят фоновым обновлением системы, жду… (${waited}с)" >&2
     sleep 10
     waited=$((waited + 10))
   done
 }
 
-wait_for_apt
-command -v curl >/dev/null 2>&1 || { apt-get update -y >/dev/null && apt-get install -y curl >/dev/null; }
-command -v jq >/dev/null 2>&1 || { apt-get update -y >/dev/null && apt-get install -y jq uuid-runtime >/dev/null; }
+# pm_install <пакеты…> — имена пакетов одинаковые во всех семействах для того, что нам нужно.
+pm_install() {
+  wait_for_pm
+  case "$PM" in
+    apt)    apt-get update -y >/dev/null && apt-get install -y "$@" >/dev/null ;;
+    dnf)    dnf install -y "$@" >/dev/null ;;
+    yum)    yum install -y "$@" >/dev/null ;;
+    zypper) zypper --non-interactive install "$@" >/dev/null ;;
+    pacman) pacman -Sy --noconfirm --needed "$@" >/dev/null ;;
+  esac
+}
+need_cmd() { # need_cmd <команда> [пакет]
+  command -v "$1" >/dev/null 2>&1 || pm_install "${2:-$1}"
+}
+# certbot в RHEL-семействе живёт в EPEL (в Fedora и остальных — в основных репозиториях).
+install_certbot() {
+  command -v certbot >/dev/null 2>&1 && return 0
+  case "$PM" in
+    dnf|yum) pm_install certbot || { pm_install epel-release && pm_install certbot; } ;;
+    *)       pm_install certbot ;;
+  esac
+}
+# Открыть порт в том файрволе, который на сервере реально есть (ufw / firewalld).
+open_port() { # open_port <порт>/tcp
+  if command -v ufw >/dev/null 2>&1; then
+    ufw allow "$1" comment 'vpn-stanok' >/dev/null 2>&1 || true
+  fi
+  if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+    firewall-cmd --permanent --add-port="$1" >/dev/null 2>&1 || true
+    firewall-cmd --reload >/dev/null 2>&1 || true
+  fi
+}
+new_uuid() { cat /proc/sys/kernel/random/uuid; }
+# <<< distro-lib
+
+need_cmd curl
+need_cmd jq
+need_cmd openssl
 
 # --- Xray-core (идемпотентно) ---
 if ! command -v xray >/dev/null 2>&1; then
@@ -105,7 +169,7 @@ if [ -z "$PRIVATE_KEY" ] || [ -z "$PUBLIC_KEY" ]; then
 fi
 
 SHORT_ID="$(openssl rand -hex 8)"
-FIRST_UUID="$(uuidgen)"
+FIRST_UUID="$(new_uuid)"
 
 # Инбаунд с тегом (нужен теге для xray api adu/rmu — живая выдача/отзыв клиентов
 # без рестарта, тот же подход, что и в install-vless.sh у Александра) + сразу
@@ -152,9 +216,7 @@ systemctl enable xray >/dev/null 2>&1 || true
 systemctl restart xray
 
 # --- firewall ---
-if command -v ufw >/dev/null 2>&1; then
-  ufw allow "${REALITY_PORT}/tcp" comment 'vless-reality' >/dev/null 2>&1 || true
-fi
+open_port "${REALITY_PORT}/tcp"
 
 LINK="vless://${FIRST_UUID}@${SERVER_IP}:${REALITY_PORT}?type=tcp&security=reality&pbk=${PUBLIC_KEY}&fp=chrome&sni=${DEST}&sid=${SHORT_ID}&flow=xtls-rprx-vision#${SERVER_IP}"
 

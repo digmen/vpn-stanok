@@ -92,7 +92,7 @@ export function preflightMessage(host: string, reason: 'timeout' | 'refused' | '
         'Адрес живой, но SSH на нём пока не работает. Обычно так бывает первые 5–10 минут ' +
         'после покупки, пока сервер разворачивается.\n\n' +
         'Что делать: подожди 10 минут и жми «Проверить снова». Если не поможет — проверь ' +
-        'в панели, что сервер включён и на нём Ubuntu.'
+        'в панели, что сервер включён и на нём обычный Linux (Ubuntu, Debian, AlmaLinux, Rocky, CentOS…).'
       );
     case 'unreachable':
       return (
