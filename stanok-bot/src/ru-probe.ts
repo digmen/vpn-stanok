@@ -64,6 +64,13 @@ export function clientStream(params: URLSearchParams): { stream: object; flow?: 
   return { error: `профиль ${type}/${security ?? 'без шифрования'} проба проверять не умеет` };
 }
 
+// 🔴 19.10: раньше качали 2 МБ с download.thinkbroadband.com — с нового московского IP сервер
+// отвечает 403 (блокирует адрес), и проба забраковала бы ЛЮБОЙ узел как «задушенный до нуля»,
+// хотя узел ни при чём. Cloudflare не блокирует хостинговые IP, отдаёт ровно 2 МБ и доступен
+// из РФ (из Москвы ~5 МБ/с). И на будущее: если источник ответил не 200 — это «проба не
+// выполнилась» (inconclusive), а не вердикт про узел.
+const SPEED_TEST_URL = 'https://speed.cloudflare.com/__down?bytes=2000000';
+
 export async function testFromRussia(vlessLink: string, waitMs = 6000): Promise<RuProbeResult | null> {
   const host = config.ruProbe.host;
   const keyPath = config.ruProbe.sshKeyPath;
@@ -125,7 +132,7 @@ export async function testFromRussia(vlessLink: string, waitMs = 6000): Promise<
     `sleep ${Math.ceil(waitMs / 1000)}; ` +
     `IP=$(curl -s -x socks5h://127.0.0.1:${socksPort} --max-time 8 https://api.ipify.org); ` +
     `SPEED=$(curl -s -o /dev/null -x socks5h://127.0.0.1:${socksPort} --max-time ${speedTimeoutS} ` +
-    `-w '%{speed_download}' https://download.thinkbroadband.com/2MB.zip); ` +
+    `-w '%{http_code}:%{speed_download}' "${SPEED_TEST_URL}"); ` +
     `echo "IP=$IP SPEED=$SPEED"; ` +
     `kill "$XPID" >/dev/null 2>&1; ` +
     `rm -f /root/probe-${tag}.json /root/probe-${tag}.log; ` +
@@ -143,9 +150,10 @@ export async function testFromRussia(vlessLink: string, waitMs = 6000): Promise<
       ['-i', keyPath, '-o', 'StrictHostKeyChecking=accept-new', '-o', 'ConnectTimeout=8', `root@${host}`, remoteScript],
       { timeout: waitMs + speedTimeoutS * 1000 + 15000 },
     );
-    const m2 = stdout.match(/IP=(\S*)\s+SPEED=(\S*)/);
+    const m2 = stdout.match(/IP=(\S*)\s+SPEED=(?:(\d+):)?(\S*)/);
     const ip = m2?.[1] ?? '';
-    const speed = Number(m2?.[2] ?? 0);
+    const speedCode = m2?.[2];
+    const speed = Number(m2?.[3] ?? 0);
     if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) {
       return {
         ok: false,
@@ -153,6 +161,10 @@ export async function testFromRussia(vlessLink: string, waitMs = 6000): Promise<
           'подключение из РФ НЕ прошло (сервер отвечает станку, но не российскому клиенту) — похоже, ' +
           'хостинг/страна узла режется на некоторых российских маршрутах. Стоит попробовать другую страну хостинга.',
       };
+    }
+    // Источник теста ответил не 200 (заблокировал адрес, лежит) — это не вина узла.
+    if (speedCode && speedCode !== '200') {
+      return { ok: false, inconclusive: true, detail: `RU-проба: источник теста скорости ответил ${speedCode} — скорость не измерена` };
     }
     if (!(speed >= MIN_WORKING_SPEED_BPS)) {
       return {
