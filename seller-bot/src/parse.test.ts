@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { withEndpointHost, withVlessHost } from './parse.js';
+import { withEndpointHost, withVlessHost, withVlessName } from './parse.js';
 
 // Общий фикс бага 25.08: Endpoint в клиентском конфиге должен браться из адреса
 // локации в боте (владелец им управляет), а не из зашитого на сервере IP.
@@ -89,4 +89,15 @@ test('vless: не путает host в @ с host= query-параметром д�
   const out = withVlessHost(link, '5.6.7.8');
   assert.ok(out.startsWith('vless://uuid@5.6.7.8:443?'));
   assert.ok(out.includes('host=example.com')); // query-параметр не тронут
+});
+
+const baseLink = 'vless://u@h.example:443?type=ws&security=tls&path=%2Fab&encryption=none';
+test('withVlessName: заменяет служебный хвост на название локации', () => {
+  assert.equal(withVlessName(baseLink + '#vless-ws-tls', 'Германия'), baseLink + '#' + encodeURIComponent('Германия'));
+});
+test('withVlessName: добавляет подпись без хвоста, кодирует пробелы и эмодзи', () => {
+  assert.equal(withVlessName(baseLink, '🇩🇪 Берлин 1'), baseLink + '#' + encodeURIComponent('🇩🇪 Берлин 1'));
+});
+test('withVlessName: пустое название ссылку не портит', () => {
+  assert.equal(withVlessName(baseLink + '#x', '  '), baseLink + '#x');
 });

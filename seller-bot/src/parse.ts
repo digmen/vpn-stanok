@@ -57,3 +57,16 @@ export function withVlessHost(link: string, host: string): string {
 export function withVlessHostPort(link: string, host: string, port: number): string {
   return link.replace(/^(vless:\/\/[^@]+@)[^:/?#]+:\d+/i, `$1${host}:${port}`);
 }
+
+/**
+ * Подпись ссылки (хвост после `#`) — это то, что клиент видит в списке серверов в
+ * приложении. Скрипты выдачи пишут туда служебное `vless-ws-tls`/`vless-reality`, и все
+ * клиенты видели одинаковую бессмысленную подпись (вопрос франчайзи 19.10: «как сделать,
+ * чтобы было написано Германия?»). Подменяем на название локации, которое владелец сам
+ * задал в боте («✏️ Переименовать»). Ссылки без `#` получают подпись так же.
+ */
+export function withVlessName(link: string, title: string): string {
+  const name = title.trim();
+  if (!name) return link;
+  return link.replace(/#.*$/s, '') + '#' + encodeURIComponent(name);
+}
