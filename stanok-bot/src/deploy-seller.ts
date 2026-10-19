@@ -24,6 +24,25 @@ export interface DeployOpts {
   domain?: string | null;
 }
 
+/** Установка Node.js 22 под любой дистрибутив: apt → NodeSource deb, dnf/yum → NodeSource rpm,
+ *  zypper/pacman → пакеты самого дистрибутива (версия может быть новее или старее — бот
+ *  работает на любой современной). Менеджер пакетов определяем по факту, не по имени ОС. */
+export function nodeInstallCommand(): string {
+  return [
+    'if command -v apt-get >/dev/null 2>&1; then',
+    `  curl -fsSL ${REMOTE.NODE_SETUP_URL} | bash - && apt-get install -y nodejs;`,
+    'elif command -v dnf >/dev/null 2>&1; then',
+    `  curl -fsSL ${REMOTE.NODE_SETUP_URL_RPM} | bash - && dnf install -y nodejs;`,
+    'elif command -v yum >/dev/null 2>&1; then',
+    `  curl -fsSL ${REMOTE.NODE_SETUP_URL_RPM} | bash - && yum install -y nodejs;`,
+    'elif command -v zypper >/dev/null 2>&1; then',
+    '  zypper --non-interactive install nodejs npm;',
+    'elif command -v pacman >/dev/null 2>&1; then',
+    '  pacman -Sy --noconfirm --needed nodejs npm;',
+    'else echo "нет известного менеджера пакетов" >&2; exit 1; fi',
+  ].join('\n');
+}
+
 // Разворачивает бота-продавца на сервере узла: Node + pm2 + код + npm install + .env + запуск.
 export async function deploySeller(opts: DeployOpts): Promise<void> {
   const ssh = new NodeSSH();
@@ -45,7 +64,7 @@ export async function deploySeller(opts: DeployOpts): Promise<void> {
     const hasNpm = (await ssh.execCommand('command -v npm || true')).stdout.trim();
     if (!hasNode || !hasNpm) {
       const r = await ssh.execCommand(
-        `curl -fsSL ${REMOTE.NODE_SETUP_URL} | bash - && apt-get install -y nodejs`,
+        nodeInstallCommand(),
       );
       if (r.code !== 0) throw new Error('Node.js не установился: ' + (r.stderr || r.stdout).slice(0, 300));
       if (!(await ssh.execCommand('command -v npm || true')).stdout.trim()) {

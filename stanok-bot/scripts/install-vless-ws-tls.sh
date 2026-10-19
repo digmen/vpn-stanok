@@ -23,30 +23,95 @@ XRAY_CONF="$XRAY_CONF_DIR/config.json"
 CERT_DIR="$XRAY_CONF_DIR/certs"
 PORT=443
 
+# >>> distro-lib (одинаковый блок в install-vless-*.sh; сверяет scripts/distro-lib.test.ts)
+# Любой серверный Linux с systemd: Debian/Ubuntu и производные (Astra, Mint, Kali…),
+# RHEL-семейство (Alma, Rocky, CentOS Stream, RHEL, Oracle, Fedora, Amazon Linux),
+# openSUSE/SLES, Arch. Без systemd (Alpine, контейнер без init) Xray-install не работает —
+# говорим об этом сразу и понятно, а не падаем в середине.
+[ "$(id -u)" = "0" ] || { echo "нужны права root" >&2; exit 1; }
+[ -d /run/systemd/system ] || {
+  echo "на сервере нет systemd (Alpine или контейнер) — Xray здесь не поставить. Нужен обычный VPS: Ubuntu, Debian, AlmaLinux, Rocky, CentOS, Fedora, openSUSE или Arch." >&2
+  exit 1
+}
+OS_ID="unknown"; OS_LIKE=""
+if [ -r /etc/os-release ]; then OS_ID="$(. /etc/os-release; echo "${ID:-unknown}")"; OS_LIKE="$(. /etc/os-release; echo "${ID_LIKE:-}")"; fi
+
+# Менеджер пакетов определяем по тому, что реально есть, а не по имени дистрибутива:
+# так работают и неизвестные производные.
+if   command -v apt-get >/dev/null 2>&1; then PM=apt
+elif command -v dnf     >/dev/null 2>&1; then PM=dnf
+elif command -v yum     >/dev/null 2>&1; then PM=yum
+elif command -v zypper  >/dev/null 2>&1; then PM=zypper
+elif command -v pacman  >/dev/null 2>&1; then PM=pacman
+else echo "не нашёл менеджер пакетов (apt/dnf/yum/zypper/pacman) — система $OS_ID не поддерживается" >&2; exit 1
+fi
+echo "система: $OS_ID, менеджер пакетов: $PM" >&2
 export DEBIAN_FRONTEND=noninteractive
 
-# Та же грабля, что и в остальных install-скриптах: свежий VPS первые минуты держит
-# dpkg-lock под unattended-upgrades.
-wait_for_apt() {
+# Свежий VPS первые минуты занят фоновым обновлением (apt: unattended-upgrades держит
+# dpkg-lock; dnf/yum: dnf-automatic/packagekit; zypper: zypp.pid).
+wait_for_pm() {
   local waited=0 max=600
   while :; do
-    if command -v fuser >/dev/null 2>&1; then
-      fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock >/dev/null 2>&1 || break
-    else
-      pgrep -f 'unattended-upgrade|apt-get|/usr/bin/dpkg' >/dev/null 2>&1 || break
-    fi
+    case "$PM" in
+      apt)
+        if command -v fuser >/dev/null 2>&1; then
+          fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock >/dev/null 2>&1 || break
+        else
+          pgrep -f 'unattended-upgrade|apt-get|/usr/bin/dpkg' >/dev/null 2>&1 || break
+        fi ;;
+      dnf|yum) pgrep -x 'dnf|yum|packagekitd' >/dev/null 2>&1 || break ;;
+      zypper)  [ -e /run/zypp.pid ] && kill -0 "$(cat /run/zypp.pid 2>/dev/null)" 2>/dev/null || break ;;
+      *) break ;;
+    esac
     if [ "$waited" -ge "$max" ]; then
-      echo "apt/dpkg занят другим процессом дольше ${max}с — подожди 5-10 минут и запусти снова." >&2
+      echo "менеджер пакетов занят другим процессом дольше ${max}с — подожди 5-10 минут и запусти снова." >&2
       exit 1
     fi
+    echo "менеджер пакетов занят фоновым обновлением системы, жду… (${waited}с)" >&2
     sleep 10
     waited=$((waited + 10))
   done
 }
 
-wait_for_apt
-command -v curl >/dev/null 2>&1 || { apt-get update -y >/dev/null && apt-get install -y curl >/dev/null; }
-command -v jq >/dev/null 2>&1 || { apt-get update -y >/dev/null && apt-get install -y jq uuid-runtime >/dev/null; }
+# pm_install <пакеты…> — имена пакетов одинаковые во всех семействах для того, что нам нужно.
+pm_install() {
+  wait_for_pm
+  case "$PM" in
+    apt)    apt-get update -y >/dev/null && apt-get install -y "$@" >/dev/null ;;
+    dnf)    dnf install -y "$@" >/dev/null ;;
+    yum)    yum install -y "$@" >/dev/null ;;
+    zypper) zypper --non-interactive install "$@" >/dev/null ;;
+    pacman) pacman -Sy --noconfirm --needed "$@" >/dev/null ;;
+  esac
+}
+need_cmd() { # need_cmd <команда> [пакет]
+  command -v "$1" >/dev/null 2>&1 || pm_install "${2:-$1}"
+}
+# certbot в RHEL-семействе живёт в EPEL (в Fedora и остальных — в основных репозиториях).
+install_certbot() {
+  command -v certbot >/dev/null 2>&1 && return 0
+  case "$PM" in
+    dnf|yum) pm_install certbot || { pm_install epel-release && pm_install certbot; } ;;
+    *)       pm_install certbot ;;
+  esac
+}
+# Открыть порт в том файрволе, который на сервере реально есть (ufw / firewalld).
+open_port() { # open_port <порт>/tcp
+  if command -v ufw >/dev/null 2>&1; then
+    ufw allow "$1" comment 'vpn-stanok' >/dev/null 2>&1 || true
+  fi
+  if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+    firewall-cmd --permanent --add-port="$1" >/dev/null 2>&1 || true
+    firewall-cmd --reload >/dev/null 2>&1 || true
+  fi
+}
+new_uuid() { cat /proc/sys/kernel/random/uuid; }
+# <<< distro-lib
+
+need_cmd curl
+need_cmd jq
+need_cmd openssl
 
 if ! command -v xray >/dev/null 2>&1; then
   bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
@@ -84,11 +149,9 @@ if [ "$resolved" != "$SERVER_IP" ]; then
   exit 1
 fi
 
-command -v certbot >/dev/null 2>&1 || { apt-get update -y >/dev/null && apt-get install -y certbot >/dev/null; }
-if command -v ufw >/dev/null 2>&1; then
-  ufw allow 80/tcp comment 'acme' >/dev/null 2>&1 || true
-  ufw allow "${PORT}/tcp" comment 'vless-ws-tls' >/dev/null 2>&1 || true
-fi
+install_certbot
+open_port 80/tcp
+open_port "${PORT}/tcp"
 # Порт 80 нужен только на время проверки владения доменом.
 certbot certonly --standalone --non-interactive --agree-tos --register-unsafely-without-email -d "$DOMAIN" >/dev/null 2>&1 || {
   echo "не удалось получить сертификат для $DOMAIN (порт 80 занят или домен не доехал)" >&2
@@ -99,9 +162,18 @@ certbot certonly --standalone --non-interactive --agree-tos --register-unsafely-
 # а /etc/letsencrypt/{live,archive} имеют права 0700 root — процесс не может прочитать
 # сертификат и падает с "permission denied", утаскивая за собой ВЕСЬ инбаунд. Поэтому
 # кладём копию туда, где её видит сам xray, и обновляем её при каждом продлении.
+# Пользователь, от которого реально работает xray: свежий установщик ставит `xray`, старый — `nobody`.
+# 19.10 на узле #35 ключ остался за nobody, сервис шёл от xray → permission denied.
+# Группа `nogroup` есть только в Debian-семействе, поэтому берём группу самого пользователя.
+xray_owner() {
+  u="$(systemctl show -p User --value xray 2>/dev/null)"; [ -n "$u" ] || u=nobody
+  g="$(systemctl show -p Group --value xray 2>/dev/null)"; [ -n "$g" ] || g="$(id -gn "$u" 2>/dev/null || echo nobody)"
+  echo "$u:$g"
+}
 install_certs() {
-  install -m 644 -o nobody -g nogroup "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" "$CERT_DIR/fullchain.pem"
-  install -m 600 -o nobody -g nogroup "/etc/letsencrypt/live/$DOMAIN/privkey.pem"  "$CERT_DIR/privkey.pem"
+  OWN="$(xray_owner)"
+  install -m 644 -o "${OWN%%:*}" -g "${OWN##*:}" "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" "$CERT_DIR/fullchain.pem"
+  install -m 600 -o "${OWN%%:*}" -g "${OWN##*:}" "/etc/letsencrypt/live/$DOMAIN/privkey.pem"  "$CERT_DIR/privkey.pem"
 }
 install_certs
 
@@ -109,14 +181,15 @@ install_certs
 mkdir -p /etc/letsencrypt/renewal-hooks/deploy
 cat > /etc/letsencrypt/renewal-hooks/deploy/xray-certs.sh <<HOOK
 #!/bin/sh
-install -m 644 -o nobody -g nogroup /etc/letsencrypt/live/$DOMAIN/fullchain.pem $CERT_DIR/fullchain.pem
-install -m 600 -o nobody -g nogroup /etc/letsencrypt/live/$DOMAIN/privkey.pem  $CERT_DIR/privkey.pem
+U=\$(systemctl show -p User --value xray); [ -n "\$U" ] || U=nobody; G=\$(id -gn "\$U")
+install -m 644 -o \$U -g \$G /etc/letsencrypt/live/$DOMAIN/fullchain.pem $CERT_DIR/fullchain.pem
+install -m 600 -o \$U -g \$G /etc/letsencrypt/live/$DOMAIN/privkey.pem  $CERT_DIR/privkey.pem
 systemctl restart xray
 HOOK
 chmod +x /etc/letsencrypt/renewal-hooks/deploy/xray-certs.sh
 
 # --- Конфиг ---
-FIRST_UUID="$(uuidgen)"
+FIRST_UUID="$(new_uuid)"
 # Путь случайный, а не общий /ws: по одинаковому пути у всех узлов сеть операторов
 # со временем научится узнавать нас оптом.
 WS_PATH="/$(openssl rand -hex 6)"
