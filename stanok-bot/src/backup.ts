@@ -74,16 +74,20 @@ export async function backupNode(node: NodeRow): Promise<{ ok: boolean; detail: 
 // Раз в сутки: бэкапим ТОЛЬКО живые primary-узлы — на них живёт seller-bot-data,
 // у доп. локаций своей копии данных нет (см. attach-location.ts). Best-effort:
 // один недоступный узел не должен ронять бэкап остальных.
-export async function backupAllPrimaries(): Promise<{ ok: number; fail: number; failures: string[] }> {
+export async function backupAllPrimaries(): Promise<{ ok: number; fail: number; failures: string[]; failed: { id: number; who: string; detail: string }[] }> {
   let ok = 0;
   const failures: string[] = [];
+  const failed: { id: number; who: string; detail: string }[] = [];
   for (const n of getReadyNodes()) {
     if (!n.is_primary) continue;
     const r = await backupNode(n);
     if (r.ok) ok++;
-    else failures.push(`#${n.id} (${n.server_ip}, @${n.tg_username ?? '—'}): ${r.detail}`);
+    else {
+      failures.push(`#${n.id} (${n.server_ip}, @${n.tg_username ?? '—'}): ${r.detail}`);
+      failed.push({ id: n.id, who: `${n.server_ip}, @${n.tg_username ?? '—'}`, detail: r.detail });
+    }
   }
-  return { ok, fail: failures.length, failures };
+  return { ok, fail: failures.length, failures, failed };
 }
 
 // Кладёт последний бэкап владельца поверх УЖЕ развёрнутого чистого seller-bot

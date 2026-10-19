@@ -45,6 +45,8 @@ import { decrypt } from './crypto.js';
 import { collectSetup, formatSetupReport } from './setup-report.js';
 import { commission, revenueReport, syncNode } from './revenue.js';
 import { backupAllPrimaries } from './backup.js';
+import { kvGet, kvSet } from './kv.js';
+import { emptyAlertState, planBackupAlert, type AlertState } from './alert-state.js';
 import { broadcast, lastBroadcast, undoLast } from './broadcast.js';
 
 const bot = new Bot<MyContext>(config.botToken);
@@ -598,9 +600,22 @@ setInterval(() => void monitorNodes(), 30 * 60 * 1000);
 async function monitorSellerTokens(): Promise<void> {
   for (const n of getReadyPrimaryNodes()) {
     const verdict = await verifyBotToken(decrypt(n.seller_token_enc));
-    if (verdict.ok || verdict.reason === 'network') continue;
+    const badKey = `tokbad:${n.id}`;
+    if (verdict.ok) {
+      // Токен снова рабочий — один раз говорим админу и забываем.
+      if (kvGet(badKey)) {
+        kvSet(badKey, null);
+        await notifyAdmins(bot.api, `🟢 Узел #${n.id} (@${n.tg_username ?? n.server_ip}): токен бота-продавца снова рабочий.`);
+      }
+      continue;
+    }
+    if (verdict.reason === 'network') continue;
 
-    // Раз в сутки на владельца, а не на каждом проходе — состояние в БД, переживает рестарт.
+    // Админу — один раз, пока токен не починят (раньше повторялось каждые сутки по тем же узлам).
+    // Состояние в БД, переживает рестарт.
+    const firstTime = kvGet(badKey) === null;
+    if (firstTime) kvSet(badKey, String(Date.now()));
+    // Владельцу напоминаем раз в сутки, как и раньше: у него бот не работает.
     if (hadRecentEvent(n.tg_user_id, 'token_invalid', 24)) continue;
     logEvent({ id: n.tg_user_id, username: n.tg_username ?? undefined }, 'token_invalid', `узел #${n.id}, монитор`);
 
@@ -616,11 +631,13 @@ async function monitorSellerTokens(): Promise<void> {
     await bot.api
       .sendMessage(n.tg_user_id, TOKEN_INVALID_HELP + '\n\nКогда будет новый токен — пришли его командой /token.')
       .catch(() => {});
-    await notifyAdmins(
-      bot.api,
-      `🔑 Узел #${n.id} (${n.server_ip}, @${n.tg_username ?? '—'}): токен бота-продавца отозван, бот не работал.` +
-        `${stopped} Владельцу написал.`,
-    );
+    if (firstTime) {
+      await notifyAdmins(
+        bot.api,
+        `🔑 Узел #${n.id} (${n.server_ip}, @${n.tg_username ?? '—'}): токен бота-продавца отозван, бот не работал.` +
+          `${stopped} Владельцу написал. Повторять не буду, пока токен не починят.`,
+      );
+    }
   }
 }
 setInterval(() => void monitorSellerTokens(), 60 * 60 * 1000);
@@ -655,14 +672,28 @@ void collectRevenue(); // первый заход сразу при старте
 // 🔴 07.09: заведено после живого случая (Ramazan_LS) — хостер пересоздал VPS с новым
 // IP, старый сервер умер безвозвратно, а вместе с ним и все настройки бота-продавца.
 // До этого дня такого бэкапа не было вообще — восстанавливать было НЕЧЕГО.
-async function backupOwnersData(): Promise<void> {
+// 🔴 19.10: раньше полный список упавших слался при КАЖДОМ рестарте и каждые сутки без изменений —
+// шум вместо информации (см. alert-state.ts). Теперь: бэкап при старте только если прошлый был
+// больше 20 часов назад, а алерт — только об изменении (новый сбой / починился / недельная сводка).
+const BACKUP_MIN_GAP_MS = 20 * 3_600_000;
+async function backupOwnersData(force = false): Promise<void> {
+  const last = Number(kvGet('backup:last') ?? 0);
+  if (!force && Date.now() - last < BACKUP_MIN_GAP_MS) return;
   const r = await backupAllPrimaries();
-  if (r.failures.length > 0) {
-    await notifyAdmins(bot.api, `⚠️ Суточный бэкап настроек: ${r.ok} ок, ${r.fail} не удалось:\n${r.failures.join('\n')}`);
+  kvSet('backup:last', String(Date.now()));
+  let prev: AlertState = emptyAlertState();
+  try {
+    const raw = kvGet('backup:alert-state');
+    if (raw) prev = JSON.parse(raw) as AlertState;
+  } catch {
+    /* битое состояние — начинаем заново */
   }
+  const plan = planBackupAlert(prev, r.failed, Date.now());
+  kvSet('backup:alert-state', JSON.stringify(plan.next));
+  if (plan.text) await notifyAdmins(bot.api, plan.text);
 }
-setInterval(() => void backupOwnersData(), 24 * 60 * 60 * 1000);
-void backupOwnersData(); // первый заход сразу при старте
+setInterval(() => void backupOwnersData(true), 24 * 60 * 60 * 1000);
+void backupOwnersData(); // при старте — только если давно не снимали
 
 // Напоминания застрявшим и узлам перед концом оплаченной недели (см. nudges.ts — правила).
 setInterval(() => void runNudges(bot.api).catch((e) => console.error('Напоминания:', e)), 15 * 60 * 1000);
