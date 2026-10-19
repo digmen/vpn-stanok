@@ -7,46 +7,15 @@ const auth = (id: number): BackupFailure => ({ id, who: `1.1.1.${id}, @u${id}`, 
 const timeout = (id: number): BackupFailure => ({ id, who: `2.2.2.${id}, @t${id}`, detail: 'Timed out while waiting for handshake' });
 
 describe('planBackupAlert', () => {
-  it('постоянный сбой сообщается сразу, один раз', () => {
-    const a = planBackupAlert(emptyAlertState(), [auth(1)], T0 + 0);
-    expect(a.text).toContain('#1');
-    const b = planBackupAlert(a.next, [auth(1)], T0 + D);
-    expect(b.text).toBeNull(); // на следующий день — тишина
-    const c = planBackupAlert(b.next, [auth(1)], T0 + 2 * D);
-    expect(c.text).toBeNull();
-  });
-
-  it('временный сбой молчит с первого раза и сообщается со второго подряд', () => {
-    const a = planBackupAlert(emptyAlertState(), [timeout(2)], T0 + 0);
+  it('никаких мгновенных сообщений: ни про новый сбой, ни про починку', () => {
+    const a = planBackupAlert(emptyAlertState(), [auth(1)], T0);
     expect(a.text).toBeNull();
-    const b = planBackupAlert(a.next, [timeout(2)], T0 + D);
-    expect(b.text).toContain('#2');
-  });
-
-  it('разовый таймаут, который прошёл, не оставляет следа', () => {
-    const a = planBackupAlert(emptyAlertState(), [timeout(3)], T0 + 0);
     const b = planBackupAlert(a.next, [], T0 + D);
     expect(b.text).toBeNull();
-    expect(b.next.failing).toEqual({});
-  });
-
-  it('починившийся узел, о котором сообщали, получает одно «снова работает»', () => {
-    const a = planBackupAlert(emptyAlertState(), [auth(4)], T0 + 0);
-    const b = planBackupAlert(a.next, [], T0 + D);
-    expect(b.text).toContain('снова работает');
-    expect(b.text).toContain('#4');
-    expect(planBackupAlert(b.next, [], T0 + 2 * D).text).toBeNull();
-  });
-
-  it('в новом списке сообщается только новый узел, старые не повторяются', () => {
-    const a = planBackupAlert(emptyAlertState(), [auth(1)], T0 + 0);
-    const b = planBackupAlert(a.next, [auth(1), auth(5)], T0 + D);
-    expect(b.text).toContain('#5');
-    expect(b.text).not.toContain('#1 ');
   });
 
   it('раз в неделю — одна короткая сводка про то, что всё ещё лежит', () => {
-    let s = planBackupAlert(emptyAlertState(), [auth(1), auth(2)], T0 + 0).next;
+    let s = planBackupAlert(emptyAlertState(), [auth(1), auth(2)], T0).next;
     for (let d = 1; d < 7; d++) {
       const r = planBackupAlert(s, [auth(1), auth(2)], T0 + d * D);
       expect(r.text).toBeNull();
@@ -54,7 +23,31 @@ describe('planBackupAlert', () => {
     }
     const w = planBackupAlert(s, [auth(1), auth(2)], T0 + WEEK_MS + 1);
     expect(w.text).toContain('2 узлов');
+    expect(w.text).toContain('#1');
+    expect(w.text).toContain('не авария');
     expect(w.text!.split('\n').length).toBe(1);
+    // и сразу после сводки снова тишина
+    expect(planBackupAlert(w.next, [auth(1), auth(2)], T0 + WEEK_MS + D).text).toBeNull();
+  });
+
+  it('сводка не приходит, если за неделю всё починилось', () => {
+    const s = planBackupAlert(emptyAlertState(), [auth(1)], T0).next;
+    const r = planBackupAlert(s, [], T0 + WEEK_MS + 1);
+    expect(r.text).toBeNull();
+  });
+
+  it('разовый таймаут в сводку не попадает, повторный — попадает', () => {
+    let s = planBackupAlert(emptyAlertState(), [timeout(3)], T0).next;
+    expect(planBackupAlert(s, [], T0 + WEEK_MS + 1).text).toBeNull(); // прошёл
+    s = planBackupAlert(emptyAlertState(), [timeout(3)], T0).next;
+    s = planBackupAlert(s, [timeout(3)], T0 + D).next; // второй раз подряд
+    expect(planBackupAlert(s, [timeout(3)], T0 + WEEK_MS + 1).text).toContain('#3');
+  });
+
+  it('первая сводка после выката не приходит сразу', () => {
+    const r = planBackupAlert(emptyAlertState(), [auth(1)], T0 + 100 * D);
+    expect(r.text).toBeNull();
+    expect(r.next.lastDigest).toBe(T0 + 100 * D);
   });
 });
 

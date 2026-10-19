@@ -1,11 +1,13 @@
-// Тихие алерты о бэкапе (19.10, по претензии владельца: «2 дня подряд шум в боте вместо нормальной информации»).
+// Тихий бэкап (19.10, по претензии владельца: «2 дня подряд шум в боте вместо нормальной информации»).
 //
-// Что было не так: полный список упавших узлов слался (а) при КАЖДОМ рестарте станка — деплоев за
-// день бывает много — и (б) каждые сутки, даже когда ничего не поменялось: узлы с умершим паролем
-// или удалённым сервером падали годами и каждый день заново «сообщались».
+// Правило, которое он сам выбрал: КРИТИЧНОЕ шлём сразу, ПРЕДУПРЕЖДЕНИЯ — раз в неделю одной сводкой.
+// Сбой бэкапа настроек — предупреждение, а не авария: VPN у клиентов работает, под угрозой только
+// копия настроек бота-продавца. Поэтому здесь никаких мгновенных сообщений: ни про новый сбой, ни про
+// «починился». Мгновенными остаются «узел недоступен», «токен отозван», «провижининг упал» (index.ts).
 //
-// Теперь сообщаем только об ИЗМЕНЕНИИ: новый сбой, узел починился, и раз в неделю — одна короткая
-// сводка о том, что всё ещё лежит. Чистая функция, без БД и сети — состояние хранит вызывающий.
+// Что было не так раньше: полный список слался при КАЖДОМ рестарте станка и каждые сутки без
+// изменений — узлы с умершим паролем падали годами и «сообщались» заново.
+// Чистая функция, без БД и сети — состояние хранит вызывающий.
 
 export interface BackupFailure {
   id: number;
@@ -46,36 +48,26 @@ export function planBackupAlert(
   now: number,
 ): { next: AlertState; text: string | null } {
   const next: AlertState = { failing: {}, lastDigest: prev.lastDigest };
-  const fresh: string[] = [];
-
   for (const f of current) {
     const key = String(f.id);
-    const old = prev.failing[key];
-    const streak = (old?.streak ?? 0) + 1;
-    let alerted = old?.alerted ?? false;
-    if (!alerted && (isPermanent(f.detail) || streak >= 2)) {
-      alerted = true;
-      fresh.push(`#${f.id} (${f.who}): ${f.detail.split('\n')[0]!.slice(0, 120)}`);
-    }
-    next.failing[key] = { streak, alerted, who: f.who };
+    const streak = (prev.failing[key]?.streak ?? 0) + 1;
+    // «Устойчивый» сбой: постоянный по типу (пароль) либо повторился в двух прогонах подряд.
+    // Разовый таймаут в сводку не попадает — это просто чужой вайфай.
+    next.failing[key] = { streak, alerted: isPermanent(f.detail) || streak >= 2, who: f.who };
   }
-
-  const recovered = Object.entries(prev.failing)
-    .filter(([k, e]) => e.alerted && !next.failing[k])
-    .map(([k, e]) => `#${k} (${e.who})`);
-
-  const lines: string[] = [];
-  if (fresh.length) lines.push(`⚠️ Бэкап настроек: новые сбои (${fresh.length}):\n${fresh.join('\n')}`);
-  if (recovered.length) lines.push(`✅ Бэкап снова работает: ${recovered.join(', ')}`);
-
   const stuck = Object.entries(next.failing).filter(([, e]) => e.alerted);
-  // Отсчёт недели начинается с первого прогона в тихом режиме, чтобы сводка не прилетела сразу.
+
+  // Отсчёт недели начинается с первого прогона, чтобы сводка не прилетела сразу после выката.
   if (prev.lastDigest === 0) {
     next.lastDigest = now;
-  } else if (!lines.length && stuck.length && now - prev.lastDigest >= WEEK_MS) {
-    next.lastDigest = now;
-    lines.push(`📋 Раз в неделю: бэкап не снимается с ${stuck.length} узлов — ${stuck.map(([k]) => '#' + k).join(', ')}.`);
+    return { next, text: null };
   }
-
-  return { next, text: lines.length ? lines.join('\n\n') : null };
+  if (now - prev.lastDigest >= WEEK_MS) {
+    next.lastDigest = now;
+    if (stuck.length) {
+      const list = stuck.map(([k, e]) => `#${k} (${e.who})`).join(', ');
+      return { next, text: `📋 Сводка за неделю: бэкап настроек не снимается с ${stuck.length} узлов — ${list}. Это предупреждение, не авария: VPN у клиентов работает.` };
+    }
+  }
+  return { next, text: null };
 }
