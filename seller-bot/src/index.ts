@@ -22,8 +22,9 @@ import {
   statsFor,
   takeBanked,
 } from './referrals.js';
-import { createVpnPeer, createVpnPeerAt, createVpnPeersEverywhere, revokePeerAt, type Peer } from './vpn.js';
-import { activeClients, addSubscription, addSubscriptionHours, clientsByTerm, extendForUser, getExpiredPeers, removePeer, revenueStars } from './subscriptions.js';
+import { collectTrafficDeltas, createVpnPeer, createVpnPeerAt, createVpnPeersEverywhere, restorePeerAt, revokePeerAt, type Peer } from './vpn.js';
+import { activeClients, addSubscription, addSubscriptionHours, allSubs, clientsByTerm, extendForUser, getExpiredPeers, removePeer, revenueStars } from './subscriptions.js';
+import { applyDeltas, decideAction, readState, subId, subUsage, writeState } from './traffic.js';
 import { APPS, offerConfig, offerConfigs, registerDeliveryHandlers } from './delivery.js';
 import {
   addRemote,
@@ -73,6 +74,7 @@ import {
   isValidDays,
   isValidHours,
   isValidPercent,
+  isValidLimitGb,
   isValidStars,
   LIMITS,
   nextPackageId,
@@ -98,7 +100,7 @@ function appLinksText(): string {
 // перезапуск специально: зависшее ожидание не должно жевать чужие сообщения.
 type PendingKind =
   | 'pkg-price' | 'pkg-days' | 'pkg-new-days' | 'pkg-new-stars'
-  | 'welcome-text' | 'welcome-photo' | 'trial-hours' | 'ref-percent' | 'promo-add' | 'tribute-key'
+  | 'welcome-text' | 'welcome-photo' | 'trial-hours' | 'ref-percent' | 'traffic-gb' | 'promo-add' | 'tribute-key'
   // Добавление локации: сначала адрес, потом пароль, потом название
   | 'loc-host' | 'loc-password' | 'loc-title' | 'loc-rename' | 'loc-editip';
 let pending: { kind: PendingKind; arg?: string; at: number } | null = null;
@@ -464,6 +466,7 @@ function adminMenu(): InlineKeyboard {
     .text('📊 Статистика', 'stats')
     .row()
     .text('🌍 Локации', 'locs')
+    .text('📶 Лимит трафика', 'trafcfg')
     .row()
     .text('🆓 Мой VPN', 'free')
     .text('⬆️ Обновление', 'upd')
@@ -477,6 +480,7 @@ function adminText(note?: string): string {
     '⚙️ Настройки твоего бота\n\n' +
     `Тарифов: ${s.packages.length}\n` +
     `Пробный период: ${s.trial.enabled ? `включён, ${humanHours(s.trial.hours)}` : 'выключен'}\n` +
+    `Лимит трафика: ${s.traffic.limitGb > 0 ? `${s.traffic.limitGb} ГБ в месяц` : 'нет'}\n` +
     `Приветствие: ${s.welcome.text ? 'своё' : 'стандартное'}${s.welcome.photo ? ' + фото' : ''}\n` +
     `Версия бота: ${currentVersion()}` +
     (note ? `\n\n${note}` : '')
@@ -660,6 +664,34 @@ bot.callbackQuery('refpercent', async (ctx) => {
   if (!isOwner(ctx.from?.id)) return;
   await ctx.reply('Какую долю от срока друга начислять? Пришли число от 1 до 50 (процентов):', {
     reply_markup: ask('ref-percent'),
+  });
+});
+
+bot.callbackQuery('trafcfg', async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!isOwner(ctx.from?.id)) return;
+  const lim = getSettings().traffic.limitGb;
+  const blocked = readState().blocked.length;
+  const kb = new InlineKeyboard().text('✏️ Изменить лимит', 'trafset').row().text('← Назад', 'admin');
+  await ctx
+    .editMessageText(
+      '📶 Лимит трафика на клиента\n\n' +
+        `Сейчас: ${lim > 0 ? `${lim} ГБ в месяц` : 'без лимита'}\n` +
+        (lim > 0 ? `Заблокировано до 1-го числа: ${blocked}\n` : '') +
+        '\nКлиент видит расход и лимит прямо в приложении (строка над списком серверов). ' +
+        'Когда лимит исчерпан, доступ выключается до 1-го числа (по UTC) и клиент получает сообщение; ' +
+        'с новым месяцем всё включается само. Подняли лимит — включится сразу.\n\n' +
+        'Считается только VLESS+WS+TLS (протокол по умолчанию): у AmneziaWG и Reality трафик по клиентам не измеряется.',
+      { reply_markup: kb },
+    )
+    .catch(() => {});
+});
+
+bot.callbackQuery('trafset', async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!isOwner(ctx.from?.id)) return;
+  await ctx.reply('Сколько ГБ в месяц на клиента? Пришли число, например 50. 0 — без лимита:', {
+    reply_markup: ask('traffic-gb'),
   });
 });
 
@@ -1355,6 +1387,18 @@ bot.on('message:text', async (ctx) => {
     return;
   }
 
+  if (kind === 'traffic-gb') {
+    if (!isValidLimitGb(n)) {
+      await ctx.reply('❌ Нужно целое число ГБ от 0 до 100000 (0 — без лимита). Пришли ещё раз:');
+      return;
+    }
+    updateSettings((cur) => ({ ...cur, traffic: { limitGb: n } }));
+    pending = null;
+    await ctx.reply(n > 0 ? `✅ Лимит: ${n} ГБ в месяц на клиента.` : '✅ Лимит трафика выключен.');
+    void sweepTraffic();
+    return;
+  }
+
   if (kind === 'ref-percent') {
     if (!isValidPercent(n)) {
       await ctx.reply('❌ Нужно целое число от 1 до 50. Больше половины срока — это уже не программа лояльности.');
@@ -1478,6 +1522,58 @@ async function sweepExpired(): Promise<void> {
     }
   }
 }
+
+// Учёт трафика и блокировка за лимит. Раз в 10 минут: замер приращений на всех WS+TLS-локациях,
+// затем сверка каждой действующей подписки с лимитом. Блокировка = отзыв ключей на серверах
+// (тот же revoke, что и при истечении), но подписка остаётся в файле — ключ вернётся с тем же
+// uuid, когда лимит позволит. Упавшая операция повторится на следующем проходе.
+let trafficBusy = false;
+async function sweepTraffic(): Promise<void> {
+  if (trafficBusy) return;
+  trafficBusy = true;
+  try {
+    const limitGb = getSettings().traffic.limitGb;
+    let st = readState();
+    // Замер нужен и при выключенном лимите: счёт идёт, чтобы клиент видел расход и чтобы
+    // включение лимита посреди месяца учло уже потраченное.
+    st = applyDeltas(st, await collectTrafficDeltas());
+    const subs = allSubs().filter((s) => s.expiresAt > Date.now());
+    st.blocked = st.blocked.filter((id) => subs.some((s) => subId(s) === id)); // ушедших не помним
+    for (const s of subs) {
+      const id = subId(s);
+      const action = decideAction(limitGb, subUsage(st, s), st.blocked.includes(id));
+      if (action === 'none') continue;
+      try {
+        if (action === 'block') {
+          for (const p of s.peers) await revokePeerAt(p.loc, p.pubkey);
+          st.blocked.push(id);
+          if (s.userId) {
+            await bot.api
+              .sendMessage(
+                s.userId,
+                `📶 Месячный лимит трафика (${limitGb} ГБ) исчерпан — VPN отключён до 1-го числа. ` +
+                  'С началом месяца он включится сам, ссылку менять не нужно.',
+              )
+              .catch(() => {});
+          }
+        } else {
+          for (const p of s.peers) await restorePeerAt(p.loc, p.pubkey);
+          st.blocked = st.blocked.filter((x) => x !== id);
+          if (s.userId) await bot.api.sendMessage(s.userId, '✅ VPN снова включён. Ссылка прежняя.').catch(() => {});
+        }
+      } catch (e) {
+        console.error('Лимит трафика: не удалось', action, e instanceof Error ? e.message : e);
+      }
+    }
+    writeState(st);
+  } catch (e) {
+    console.error('Учёт трафика:', e instanceof Error ? e.message : e);
+  } finally {
+    trafficBusy = false;
+  }
+}
+setInterval(() => void sweepTraffic(), 10 * 60 * 1000);
+void sweepTraffic();
 
 bot.catch((err) => console.error('Ошибка бота-продавца:', err));
 
