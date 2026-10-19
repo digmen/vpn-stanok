@@ -50,7 +50,7 @@ export const LOCATION_LIMITS = {
   // нужна генератору id ниже (nextLocationId перебирает l2..lN) и как защита от
   // случайного спама.
   MAX_REMOTE: 100,
-  MAX_TITLE_LEN: 24,
+  MAX_TITLE_LEN: 40,
 } as const;
 
 function readRemotes(): RemoteLocation[] {

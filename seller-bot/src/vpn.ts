@@ -3,7 +3,7 @@ import { promisify } from 'node:util';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PEER_SCRIPT_TIMEOUT_MS } from './constants.js';
-import { extractClientConfig, withEndpointHost, withVlessHost, withVlessHostPort } from './parse.js';
+import { extractClientConfig, withEndpointHost, withVlessHost, withVlessHostPort, withVlessName } from './parse.js';
 import { allLocations, findLocation, getClientEndpoint, PRIMARY_LOCATION_ID, type Location, type VpnProtocol } from './locations.js';
 import { runScript } from './ssh.js';
 
@@ -89,7 +89,9 @@ export async function createVpnPeerAt(loc: Location): Promise<Peer> {
       : host
         ? (isVless ? withVlessHost(config, host) : withEndpointHost(config, host))
         : config;
-    return { config: finalConfig, pubkey, loc: loc.id, locTitle: loc.title, protocol: loc.protocol };
+    // Подпись в приложении клиента = название локации (а не служебное vless-ws-tls).
+    const named = isVless ? withVlessName(finalConfig, loc.title) : finalConfig;
+    return { config: named, pubkey, loc: loc.id, locTitle: loc.title, protocol: loc.protocol };
   } catch (e: unknown) {
     throw new Error(shortError(e));
   }
