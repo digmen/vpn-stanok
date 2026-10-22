@@ -53,6 +53,11 @@ export function hasAcceptedTerms(userId: number): boolean {
   return kvGet(key(userId)) !== null;
 }
 
+/** Какую версию принял человек: null — не принимал. Нужна, чтобы новая версия просила согласие заново. */
+export function acceptedTermsVersion(userId: number): string | null {
+  return kvGet(key(userId))?.split('|')[0] ?? null;
+}
+
 export function acceptTerms(userId: number, now = new Date()): void {
   kvSet(key(userId), `${TERMS_VERSION}|${now.toISOString()}`);
 }

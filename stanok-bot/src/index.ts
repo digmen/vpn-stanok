@@ -24,7 +24,7 @@ import {
   ownerRecoveredMessage,
   type OwnerDowntime,
 } from './downtime.js';
-import { acceptTerms, hasAcceptedTerms, TERMS_ACCEPT_CALLBACK, TERMS_FULL, TERMS_VERSION } from './terms.js';
+import { acceptedTermsVersion, acceptTerms, TERMS_ACCEPT_CALLBACK, TERMS_FULL, TERMS_VERSION } from './terms.js';
 import { onboarding, updateToken, type MyContext } from './onboarding.js';
 import { provisionNode } from './provision.js';
 import { notifyAdmins } from './admin.js';
@@ -157,7 +157,7 @@ bot.command('terms', async (ctx) => {
 
 bot.callbackQuery(TERMS_ACCEPT_CALLBACK, async (ctx) => {
   await ctx.answerCallbackQuery({ text: 'Принято, спасибо' }).catch(() => {});
-  if (!hasAcceptedTerms(ctx.from.id)) {
+  if (acceptedTermsVersion(ctx.from.id) !== TERMS_VERSION) {
     acceptTerms(ctx.from.id);
     logEvent(ctx.from, 'terms_accepted', TERMS_VERSION);
   }
