@@ -69,6 +69,10 @@ export type SideStep =
   | 'buy_open'
   // 13.09: сервер не принял root-пароль прямо на шаге ввода (см. preflight.ts::checkSshLogin).
   | 'password_wrong'
+  // 22.10: владельцу написали, что его бот не отвечает больше суток (detail = причина и номер
+  // сообщения), и принятие условий (см. downtime.ts, terms.ts).
+  | 'owner_alerted'
+  | 'terms_accepted'
   // 22.10: сервер не достаёт до Telegram (хостер режет api.telegram.org) — бот на нём работать не сможет
   // (см. tg-reach.ts). detail — IP и где поймали: до установки или после запуска бота.
   | 'telegram_blocked'
