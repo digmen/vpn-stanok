@@ -114,3 +114,10 @@ test('buildSubStats: по обращениям из handleSubscriptionRequest с
   assert.match(text, /Всего обращений: \d+/);
   assert.match(text, /@stat_user/);
 });
+
+test('subscriptionNote: ссылка в тексте и честное объяснение, чем подписка лучше ключа', () => {
+  const note = S.subscriptionNote('https://node1.example.com:8443/sub/abc');
+  assert.match(note, /https:\/\/node1\.example\.com:8443\/sub\/abc/);
+  assert.match(note, /кнопка обновления/);
+  assert.match(note, /одиночного ключа/);
+});

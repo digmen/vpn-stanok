@@ -45,7 +45,7 @@ import { attachServer, ping } from './ssh.js';
 import { claimOwnerIfUnset, getOwnerId } from './owner.js';
 import { readOwnerConfig, saveOwnerConfig } from './owner-config.js';
 import { buildStats, recordEvent } from './stats.js';
-import { buildSubStats, subscriptionToken, subscriptionUrl } from './subscription.js';
+import { buildSubStats, subscriptionNote, subscriptionToken, subscriptionUrl } from './subscription.js';
 import { allCampaignTags, campaignReport, isCampaignTag, recordCampaignTouch } from './campaigns.js';
 import { hasUsedTrial, markTrialUsed, trialCount } from './trials.js';
 import { checkUpdate, currentVersion, startSelfUpdate } from './update.js';
@@ -356,10 +356,7 @@ async function deliverPurchase(opts: {
   const subToken = peers.find((p) => p.protocol === 'vless_ws_tls')?.pubkey;
   if (subToken && config.nodeDomain) {
     await bot.api
-      .sendMessage(
-        userId,
-        `🔗 Или подписка одной ссылкой (для приложений, которые её понимают — держит список серверов актуальным сам):\n${subscriptionUrl(config.nodeDomain, config.tributeWebhookPort, subToken)}`,
-      )
+      .sendMessage(userId, subscriptionNote(subscriptionUrl(config.nodeDomain, config.tributeWebhookPort, subToken)))
       .catch(() => {});
   }
   if (bonusDays > 0) {
@@ -439,6 +436,13 @@ async function giveTrial(ctx: any): Promise<void> {
     stars: 0,
   });
   await offerConfig(ctx.api, ctx.chat!.id, peer.config, peer.locTitle, peer.protocol);
+  // Подписка уже заведена строкой выше (addSubscriptionHours) — осталось отдать ссылку на неё.
+  // Только у узлов с доменом и сертификатом (vless_ws_tls): на остальных подписку взять неоткуда.
+  if (peer.protocol === 'vless_ws_tls' && config.nodeDomain) {
+    await ctx.api
+      .sendMessage(ctx.chat!.id, subscriptionNote(subscriptionUrl(config.nodeDomain, config.tributeWebhookPort, peer.pubkey)))
+      .catch(() => {});
+  }
   await ctx.reply(`🎁 Пробный доступ на ${humanHours(s.trial.hours)} активен. Приложение — кнопка ниже, вместе с ключом.`);
 }
 
