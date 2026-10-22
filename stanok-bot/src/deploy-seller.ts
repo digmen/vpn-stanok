@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { NodeSSH } from 'node-ssh';
+import { botReachesTelegram, TelegramUnreachableError } from './tg-reach.js';
 import { REMOTE, SSH } from './constants.js';
 import type { NodeProtocol } from './db.js';
 
@@ -124,6 +125,20 @@ export async function deploySeller(opts: DeployOpts): Promise<void> {
     // (см. checkNodeAlive), но чинить не умел, только слал алерт. Идемпотентно, безопасно
     // звать повторно на уже настроенных узлах — `pm2 startup` только создаёт юнит.
     await ssh.execCommand('pm2 startup systemd -u root --hp /root >/dev/null 2>&1; pm2 save');
+
+    // 8. Бот реально видит Telegram — проверяем С УЗЛА и ЕГО токеном, а не со станка.
+    //
+    // 🔴 22.10 (узел #36): pm2 показывает online и в логе ни одной ошибки, а хостер режет
+    // Telegram, и бот молчит. Станок считал «Готово» по тому, что процесс запустился.
+    // Даём боту подняться, спрашиваем getMe; пару раз, чтобы не принять за блокировку
+    // секундную осечку сети. Отвергнутый токен (401) тут не ловим — его проверили раньше.
+    // 'unknown' (на узле нет curl и т.п.) не валит установку.
+    let reach = await botReachesTelegram(ssh, opts.sellerToken);
+    for (let i = 0; i < 2 && !reach.ok && reach.reason === 'blocked'; i++) {
+      await new Promise((r) => setTimeout(r, 5_000));
+      reach = await botReachesTelegram(ssh, opts.sellerToken);
+    }
+    if (!reach.ok && reach.reason === 'blocked') throw new TelegramUnreachableError(reach.detail);
   } finally {
     ssh.dispose();
   }

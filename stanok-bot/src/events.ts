@@ -69,6 +69,9 @@ export type SideStep =
   | 'buy_open'
   // 13.09: сервер не принял root-пароль прямо на шаге ввода (см. preflight.ts::checkSshLogin).
   | 'password_wrong'
+  // 22.10: сервер не достаёт до Telegram (хостер режет api.telegram.org) — бот на нём работать не сможет
+  // (см. tg-reach.ts). detail — IP и где поймали: до установки или после запуска бота.
+  | 'telegram_blocked'
   // 13.09: напоминание застрявшему (detail = вид) и отказ от напоминаний (см. nudges.ts).
   | 'nudge'
   | 'nudge_off'
@@ -151,7 +154,7 @@ export function dropReasons(): { step: string; detail: string | null; times: num
   return db
     .prepare(
       `SELECT step, detail, COUNT(*) times FROM events
-        WHERE step IN ('ip_rejected','ip_taken','preflight_fail','provision_fail')
+        WHERE step IN ('ip_rejected','ip_taken','preflight_fail','provision_fail','telegram_blocked')
         GROUP BY step, detail ORDER BY times DESC`,
     )
     .all() as { step: string; detail: string | null; times: number }[];
