@@ -2,6 +2,15 @@ import { Bot, InlineKeyboard, Keyboard } from 'grammy';
 import { config } from './config.js';
 import { promoEnabled } from './branding.js';
 import { maybePromoNudge, promoLink } from './promo-nudge.js';
+import {
+  ADS_CONSENT_QUESTION,
+  ADS_OPTOUT_CALLBACK,
+  markAsked as markAdsAsked,
+  optOut as adsOptOut,
+  readAdsState,
+  runAds,
+  setConsent as setAdsConsent,
+} from './ads.js';
 import { markReminded, pendingReminders } from './reminders.js';
 import {
   addPromo,
@@ -456,7 +465,7 @@ bot.callbackQuery('trial', async (ctx) => {
 
 // ── кабинет владельца ─────────────────────────────────────────────────────
 function adminMenu(): InlineKeyboard {
-  return new InlineKeyboard()
+  const kb = new InlineKeyboard()
     .text('💲 Тарифы', 'tariffs')
     .text('🎁 Пробный период', 'trialcfg')
     .row()
@@ -477,8 +486,10 @@ function adminMenu(): InlineKeyboard {
     .row()
     .text('🆓 Мой VPN', 'free')
     .text('⬆️ Обновление', 'upd')
-    .row()
-    .text('← В меню', 'menu');
+    .row();
+  // Реклама франшизы (ads.ts): у оплативших белую марку её нет вовсе.
+  if (promoEnabled()) kb.text('📣 Реклама франшизы', 'adscfg').row();
+  return kb.text('← В меню', 'menu');
 }
 
 function adminText(note?: string): string {
@@ -672,6 +683,64 @@ bot.callbackQuery('refpercent', async (ctx) => {
   await ctx.reply('Какую долю от срока друга начислять? Пришли число от 1 до 50 (процентов):', {
     reply_markup: ask('ref-percent'),
   });
+});
+
+// ── реклама франшизы (ads.ts): только с согласия владельца ───────────────────
+function adsScreen(): { text: string; kb: InlineKeyboard } {
+  const st = readAdsState();
+  const on = st.consent?.on === true;
+  const kb = new InlineKeyboard()
+    .text(on ? '⏸ Выключить' : '▶️ Включить', on ? 'adsset:off' : 'adsset:on')
+    .row()
+    .text('← Назад', 'admin');
+  const status = on ? 'включена' : st.consent ? 'выключена' : 'выключена (ты ещё не решал)';
+  return {
+    kb,
+    text:
+      '📣 Реклама франшизы\n\n' +
+      `Сейчас: ${status}\n\n` +
+      'Франшиза VPNForge может показывать твоим клиентам рекламу «хочешь такой же бот?». Сообщение приходит от имени ТВОЕГО бота, ' +
+      'с пометкой «Реклама · VPNForge» и кнопкой «Больше не показывать».\n\n' +
+      'Правила: одному клиенту не чаще раза в 14 дней; только днём; только клиентам с подпиской или пробным за последние 30 дней; ' +
+      'тебе реклама не приходит; отправляет твой бот, список клиентов с сервера не уходит. Можно выключить в любой момент.',
+  };
+}
+
+bot.callbackQuery('adscfg', async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!isOwner(ctx.from?.id) || !promoEnabled()) return;
+  const { text, kb } = adsScreen();
+  await ctx.editMessageText(text, { reply_markup: kb }).catch(() => {});
+});
+
+bot.callbackQuery(/^adsset:(on|off)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!isOwner(ctx.from?.id) || !promoEnabled()) return;
+  setAdsConsent(ctx.match[1] === 'on');
+  const { text, kb } = adsScreen();
+  await ctx.editMessageText(text, { reply_markup: kb }).catch(() => {});
+});
+
+// Единственный вопрос после обновления (см. askAdsConsent ниже).
+bot.callbackQuery(/^adsq:(yes|no)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!isOwner(ctx.from?.id)) return;
+  const yes = ctx.match[1] === 'yes';
+  setAdsConsent(yes);
+  await ctx
+    .editMessageText(
+      yes
+        ? '✅ Реклама франшизы включена. Выключить можно в любой момент: ⚙️ Мой бот → 📣 Реклама франшизы.'
+        : '👌 Реклама выключена. Передумаешь — ⚙️ Мой бот → 📣 Реклама франшизы.',
+    )
+    .catch(() => {});
+});
+
+// Клиент попросил больше не показывать.
+bot.callbackQuery(ADS_OPTOUT_CALLBACK, async (ctx) => {
+  adsOptOut(ctx.from.id);
+  await ctx.answerCallbackQuery({ text: 'Больше не покажу' }).catch(() => {});
+  await ctx.editMessageReplyMarkup({ reply_markup: new InlineKeyboard() }).catch(() => {});
 });
 
 bot.callbackQuery('trafcfg', async (ctx) => {
@@ -2002,6 +2071,23 @@ syncTributeServer(handleTributeEvent, () => {
     .catch(() => {});
 });
 watchTributeCert();
+
+// Реклама франшизы: раз в 3 часа проход (сам проверяет согласие, окно дня и подпись объявления) и
+// один раз — вопрос владельцу после обновления. Всё в try: реклама никогда не роняет бота.
+setInterval(() => void runAds(bot.api).catch(() => {}), 3 * 3600_000);
+setTimeout(() => void runAds(bot.api).catch(() => {}), 5 * 60_000);
+setTimeout(async () => {
+  try {
+    const owner = getOwnerId();
+    if (!owner || !promoEnabled() || readAdsState().asked) return;
+    await bot.api.sendMessage(owner, ADS_CONSENT_QUESTION, {
+      reply_markup: new InlineKeyboard().text('✅ Включить', 'adsq:yes').text('Не сейчас', 'adsq:no'),
+    });
+    markAdsAsked();
+  } catch {
+    /* спросим при следующем запуске */
+  }
+}, 60_000);
 
 await bot.start({
   onStart: (info) => console.log(`Бот-продавец @${info.username} запущен, версия ${currentVersion()}`),
