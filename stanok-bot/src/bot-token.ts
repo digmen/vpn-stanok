@@ -17,6 +17,23 @@ export type TokenVerdict =
    *  вызывающий код должен трактовать это как «не знаю», а не как отказ. */
   | { ok: false; reason: 'network' };
 
+/**
+ * Сколько сообщений у бота лежит необработанными (getWebhookInfo). Живой бот забирает их
+ * за доли секунды, поэтому стабильное «больше нуля» значит, что бот не опрашивает Telegram.
+ * null — не смогли спросить (сеть, токен отозван): это не сигнал ни в какую сторону.
+ */
+export async function pendingUpdates(token: string, timeoutMs = 10_000): Promise<number | null> {
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${token}/getWebhookInfo`, {
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    const body = (await res.json()) as { ok: boolean; result?: { pending_update_count?: number } };
+    return body.ok ? (body.result?.pending_update_count ?? 0) : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function verifyBotToken(token: string, timeoutMs = 10_000): Promise<TokenVerdict> {
   try {
     const res = await fetch(`https://api.telegram.org/bot${token}/getMe`, {

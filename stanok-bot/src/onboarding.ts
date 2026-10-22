@@ -8,6 +8,7 @@ import { logEvent, type FunnelStep, type SideStep } from './events.js';
 import { checkSshLogin, checkSshPort, preflightMessage } from './preflight.js';
 import { checkTelegramFromServer, telegramBlockedMessage } from './tg-reach.js';
 import { verifyBotToken } from './bot-token.js';
+import { acceptTerms, hasAcceptedTerms, TERMS_ACCEPT_CALLBACK, TERMS_SHORT, TERMS_VERSION } from './terms.js';
 import { updateSellerToken } from './deploy-seller.js';
 import { checkIp, extractIpv4, ipProblemMessage, isNonEmptySecret, isValidBotToken, notIpMessage } from './validate.js';
 import { clearSecretWait, markSecretWait, type SecretKind } from './chat-log.js';
@@ -354,6 +355,17 @@ export async function onboarding(conversation: MyConversation, ctx: MyContext) {
   // Последний primary этого владельца НЕЗАВИСИМО от статуса — нужен ниже, чтобы
   // отличить «умер, это его замена» от «жив, это вторая точка» без переспросов.
   const primaryAny = await conversation.external(() => getPrimaryNodeAny(from.id));
+
+  // 22.10: до первого шага человек видит условия и принимает их. Принявший раньше (в рассылке
+  // или при прошлой настройке) этого экрана не видит.
+  if (!(await conversation.external(() => hasAcceptedTerms(from.id)))) {
+    const kb = new InlineKeyboard().text('✅ Принимаю', TERMS_ACCEPT_CALLBACK);
+    await ctx.reply(TERMS_SHORT, { reply_markup: kb });
+    const upd = await conversation.waitForCallbackQuery(TERMS_ACCEPT_CALLBACK);
+    await upd.answerCallbackQuery().catch(() => {});
+    await conversation.external(() => acceptTerms(from.id));
+    await track('terms_accepted', TERMS_VERSION);
+  }
 
   const ip = await ipThatAnswers(conversation, ctx, from.id, track);
   const protocol = NEW_NODE_PROTOCOL;

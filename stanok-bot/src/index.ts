@@ -13,8 +13,18 @@ import {
   setNodeHealthOk,
   setRevenueSharePercent,
 } from './db.js';
-import { TOKEN_INVALID_HELP, verifyBotToken } from './bot-token.js';
-import { stopSellerBot } from './deploy-seller.js';
+import { pendingUpdates, TOKEN_INVALID_HELP, verifyBotToken } from './bot-token.js';
+import { getBotUsername, stopSellerBot } from './deploy-seller.js';
+import {
+  decideOwnerAlert,
+  downtimeCause,
+  isOwnerBotSilent,
+  MAX_ALERTS,
+  ownerDowntimeMessage,
+  ownerRecoveredMessage,
+  type OwnerDowntime,
+} from './downtime.js';
+import { acceptTerms, hasAcceptedTerms, TERMS_ACCEPT_CALLBACK, TERMS_FULL, TERMS_VERSION } from './terms.js';
 import { onboarding, updateToken, type MyContext } from './onboarding.js';
 import { provisionNode } from './provision.js';
 import { notifyAdmins } from './admin.js';
@@ -137,6 +147,22 @@ async function gate(ctx: MyContext, next: 'start' | 'bought' | 'setup'): Promise
   );
   return false;
 }
+
+// Условия для владельцев (terms.ts): полный текст по команде и кнопка «Принимаю» из рассылки.
+// Внутри мастера настройки кнопку принимает сам мастер (onboarding.ts) — до этих обработчиков
+// апдейт не доходит.
+bot.command('terms', async (ctx) => {
+  for (const part of chunks(TERMS_FULL)) await ctx.reply(part);
+});
+
+bot.callbackQuery(TERMS_ACCEPT_CALLBACK, async (ctx) => {
+  await ctx.answerCallbackQuery({ text: 'Принято, спасибо' }).catch(() => {});
+  if (!hasAcceptedTerms(ctx.from.id)) {
+    acceptTerms(ctx.from.id);
+    logEvent(ctx.from, 'terms_accepted', TERMS_VERSION);
+  }
+  await ctx.editMessageReplyMarkup({ reply_markup: new InlineKeyboard() }).catch(() => {});
+});
 
 bot.command('start', async (ctx) => {
   logEvent(ctx.from!, 'start');
@@ -583,9 +609,60 @@ async function monitorNodes(): Promise<void> {
       await notifyAdmins(bot.api, `🟢 Узел #${n.id} (${n.server_ip}) снова онлайн.`);
     }
     setNodeHealthOk(n.id, health.ok);
+    // Текст последней неудачи нужен монитору простоя, чтобы отличить «пароль не подходит» от
+    // «сервер лёг» (monitorOwnerBots ниже). Успех стирает запись.
+    kvSet(`healthdetail:${n.id}`, health.ok ? null : health.detail.slice(0, 300));
   }
 }
 setInterval(() => void monitorNodes(), 30 * 60 * 1000);
+
+// Простой бота владельца: если он молчит больше суток, сообщаем ЕМУ (см. downtime.ts).
+//
+// 🔴 22.10, Рамазан (#19): сервер пересоздали, бот пропал, 15 сообщений его клиентов висели
+// 5 суток, а станок один раз написал админу и замолчал. Сигнал «молчит» — не SSH (на такие узлы
+// станок часто не может зайти по паролю), а Telegram: у живого бота необработанных сообщений
+// нет, у мёртвого они копятся. Плюс проверка здоровья узла — для текста причины.
+// Токен отозван — это отдельный монитор ниже (tokbad), его не дублируем.
+async function monitorOwnerBots(): Promise<void> {
+  for (const n of getReadyPrimaryNodes()) {
+    if (kvGet(`tokbad:${n.id}`)) continue;
+    const token = decrypt(n.seller_token_enc);
+    const pending = await pendingUpdates(token);
+    if (pending === null) continue; // Telegram не ответил — не сигнал, не трогаем состояние
+    const bad = isOwnerBotSilent(pending, n.last_health_ok, kvGet(`healthdetail:${n.id}`));
+
+    const stateKey = `ownerdown:${n.id}`;
+    const raw = kvGet(stateKey);
+    const prev: OwnerDowntime | null = raw ? (JSON.parse(raw) as OwnerDowntime) : null;
+    const { state, action } = decideOwnerAlert(prev, bad, Date.now());
+    kvSet(stateKey, state ? JSON.stringify(state) : null);
+    if (action === 'none') continue;
+
+    const botName = await getBotUsername(token);
+    if (action === 'recovered') {
+      await bot.api.sendMessage(n.tg_user_id, ownerRecoveredMessage(botName)).catch(() => {});
+      logEvent({ id: n.tg_user_id, username: n.tg_username ?? undefined }, 'owner_alerted', `узел #${n.id}, восстановился`);
+      await notifyAdmins(bot.api, `🟢 Узел #${n.id} (@${n.tg_username ?? '—'}): бот снова отвечает, владельцу сообщил.`);
+      continue;
+    }
+    const cause = downtimeCause(n.last_health_ok, kvGet(`healthdetail:${n.id}`));
+    const delivered = await bot.api
+      .sendMessage(n.tg_user_id, ownerDowntimeMessage(cause, botName, action === 'alert' ? 'alert' : 'remind'))
+      .then(() => true)
+      .catch(() => false);
+    logEvent(
+      { id: n.tg_user_id, username: n.tg_username ?? undefined },
+      'owner_alerted',
+      `узел #${n.id}, ${cause}, сообщение ${state?.notified}${delivered ? '' : ', не доставлено'}`,
+    );
+    await notifyAdmins(
+      bot.api,
+      `📣 Узел #${n.id} (@${n.tg_username ?? '—'}): бот молчит больше суток (${cause}, необработанных: ${pending}). ` +
+        `Владельцу ${delivered ? 'написал' : 'НЕ удалось написать'} (сообщение ${state?.notified} из ${MAX_ALERTS}).`,
+    );
+  }
+}
+setInterval(() => void monitorOwnerBots(), 30 * 60 * 1000);
 
 // Проверка токенов ботов-продавцов: раз в час.
 //
