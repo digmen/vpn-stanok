@@ -8,7 +8,8 @@ process.env.BOT_TOKEN ??= '1:test';
 process.env.ENCRYPTION_KEY ??= 'a'.repeat(64);
 process.env.DB_PATH ??= path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'stanok-terms-')), 'test.db');
 
-const { TERMS_FULL, TERMS_SHORT, TERMS_VERSION, acceptTerms, hasAcceptedTerms } = await import('./terms.js');
+const { kvSet } = await import('./kv.js');
+const { TERMS_FULL, TERMS_SHORT, TERMS_VERSION, acceptTerms, acceptedTermsVersion, hasAcceptedTerms } = await import('./terms.js');
 
 describe('условия владельцев', () => {
   it('влезают в сообщения Telegram: короткий в одно, полный не длиннее трёх', () => {
@@ -42,5 +43,16 @@ describe('условия владельцев', () => {
     acceptTerms(101, new Date('2026-10-22T20:00:00Z'));
     expect(hasAcceptedTerms(101)).toBe(true);
     expect(hasAcceptedTerms(102)).toBe(false);
+  });
+
+  it('версия согласия видна: принявший старую версию не считается принявшим текущую', () => {
+    expect(acceptedTermsVersion(103)).toBeNull();
+    acceptTerms(103);
+    expect(acceptedTermsVersion(103)).toBe(TERMS_VERSION);
+    // согласие на прошлую версию (как у разосланных 22.10) — не равно текущей
+    kvSet('terms:104', '2026-10-22|2026-10-22T20:00:00.000Z');
+    expect(hasAcceptedTerms(104)).toBe(true);
+    expect(acceptedTermsVersion(104)).toBe('2026-10-22');
+    expect(acceptedTermsVersion(104)).not.toBe(TERMS_VERSION);
   });
 });
