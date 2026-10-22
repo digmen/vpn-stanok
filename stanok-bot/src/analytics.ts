@@ -13,6 +13,7 @@ export const FAIL_STEPS = new Set([
   'preflight_fail',
   'provision_fail',
   'password_wrong',
+  'telegram_blocked',
   'token_invalid',
   'token_taken',
 ]);

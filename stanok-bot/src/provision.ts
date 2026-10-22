@@ -17,6 +17,7 @@ import { humanInstallError } from './install-error.js';
 import { notifyAdmins } from './admin.js';
 import { checkSshPort, isAuthFailure, preflightMessage } from './preflight.js';
 import { logEvent } from './events.js';
+import { checkTelegramFromServer, TelegramUnreachableError, telegramBlockedMessage } from './tg-reach.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -80,6 +81,26 @@ export async function provisionNode(
     logEvent(who, 'preflight_fail', `${node.server_ip} · ${pf.reason} · перед провижинингом`);
     await show(preflightMessage(node.server_ip, pf.reason), retryKb);
     return;
+  }
+
+  // 🔴 22.10: бот-продавец ставится на основной сервер и работает через Telegram. Если хостер
+  // его режет, VPN поднимется, а бот будет молчать при «Готово» (узел #36). Проверяем ДО
+  // установки: пока ничего не поставлено, человеку проще сменить хостинг. 'unknown' не
+  // блокирует — после запуска бота есть вторая проверка (deploy-seller.ts).
+  if (node.is_primary) {
+    const tg = await checkTelegramFromServer(node.server_ip, password);
+    if (tg === 'blocked') {
+      setNodeStatus(nodeId, 'error');
+      logEvent(who, 'telegram_blocked', `${node.server_ip} · до установки`);
+      const blockedKb = new InlineKeyboard().text('🛒 Как купить сервер', 'buy');
+      if (config.supportBotToken) blockedKb.row().url('🆘 Поддержка', config.supportBotUrl + '?start=telegram');
+      await show(telegramBlockedMessage(node.server_ip), blockedKb);
+      await notifyAdmins(
+        api,
+        `🚫 Узел #${nodeId} (@${node.tg_username ?? '—'}, ${node.server_ip}): сервер не достаёт до Telegram, ничего не ставил.`,
+      );
+      return;
+    }
   }
 
   // 🔴 08.09: VLESS+WS+TLS требует домен (на него выписывается сертификат Let's Encrypt),
@@ -339,6 +360,18 @@ export async function provisionNode(
     }
   } catch (e) {
     setNodeStatus(nodeId, 'error');
+    if (e instanceof TelegramUnreachableError) {
+      // Бот запущен, но с узла не достаёт до Telegram (см. deploy-seller.ts). «Готово» тут нельзя.
+      logEvent(who, 'telegram_blocked', `${node.server_ip} · после запуска бота: ${e.message}`.slice(0, 200));
+      const blockedKb = new InlineKeyboard().text('🛒 Как купить сервер', 'buy');
+      if (config.supportBotToken) blockedKb.row().url('🆘 Поддержка', config.supportBotUrl + '?start=telegram');
+      await show(telegramBlockedMessage(node.server_ip), blockedKb);
+      await notifyAdmins(
+        api,
+        `🚫 Узел #${nodeId} (@${node.tg_username ?? '—'}, ${node.server_ip}): VPN и бот поставлены, но бот не достаёт до Telegram (${e.message}). Владельцу объяснил, «Готово» не писал.`,
+      );
+      return;
+    }
     const msg = e instanceof Error ? e.message : String(e);
     logEvent(who, 'provision_fail', `${node.server_ip} · ${msg}`.slice(0, 200));
     // Владельцу — не сырой вывод скрипта, а что с этим делать: «tput: No value for $TERM»

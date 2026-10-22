@@ -6,6 +6,7 @@ import { demoteNode, findNodeByIpOfOtherUser, getAllNodes, getPrimaryNodeAny, ge
 import { notifyAdmins } from './admin.js';
 import { logEvent, type FunnelStep, type SideStep } from './events.js';
 import { checkSshLogin, checkSshPort, preflightMessage } from './preflight.js';
+import { checkTelegramFromServer, telegramBlockedMessage } from './tg-reach.js';
 import { verifyBotToken } from './bot-token.js';
 import { updateSellerToken } from './deploy-seller.js';
 import { checkIp, extractIpv4, ipProblemMessage, isNonEmptySecret, isValidBotToken, notIpMessage } from './validate.js';
@@ -385,6 +386,23 @@ export async function onboarding(conversation: MyConversation, ctx: MyContext) {
       'Пришли root-пароль ещё раз:';
   }
   await track('password_ok'); // сам пароль в журнал не попадает — только факт
+
+  // 🔴 22.10: бот-продавец живёт на этом сервере и работает через Telegram. Если хостер режет
+  // Telegram (случай узла #36), бот запустится и будет молчать, а станок скажет «Готово».
+  // Узнаём это сейчас, пока человек не отдал токен и не ждал установки. Только для основного
+  // сервера: у дополнительной точки бота нет, ему Telegram не нужен. 'unknown' (не смогли
+  // проверить) не блокирует — после запуска бота есть вторая проверка (deploy-seller.ts).
+  if (!primary) {
+    const pwNow = rootPassword;
+    const tg = await conversation.external(() => checkTelegramFromServer(ip, pwNow));
+    if (tg === 'blocked') {
+      await track('telegram_blocked', `${ip} · до установки`);
+      const blockedKb = new InlineKeyboard().text('🛒 Как купить сервер', 'buy');
+      if (config.supportBotToken) blockedKb.row().url('🆘 Поддержка', config.supportBotUrl + '?start=telegram');
+      await ctx.reply(telegramBlockedMessage(ip), { reply_markup: blockedKb });
+      return;
+    }
+  }
 
   // Токен бота-продавца у владельца всегда ОДИН (он один раз завёл его в BotFather) —
   // если уже видели хоть одну его заявку в primary, переспрашивать нечего, берём сохранённый.
