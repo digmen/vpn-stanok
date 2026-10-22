@@ -165,7 +165,9 @@ bot.callbackQuery(TERMS_ACCEPT_CALLBACK, async (ctx) => {
 });
 
 bot.command('start', async (ctx) => {
-  logEvent(ctx.from!, 'start');
+  // Метка `src_<id владельца бота>` приходит со ссылки из бота-продавца (seller-bot/promo-nudge.ts):
+  // по ней видно, какие боты реально приводят новых владельцев. Прочие параметры не пишем.
+  logEvent(ctx.from!, 'start', /^src_\d{1,15}$/.test(ctx.match) ? ctx.match : undefined);
   if (!(await gate(ctx, 'start'))) return;
   await ctx.reply(START_TEXT, { reply_markup: startKeyboard() });
 });

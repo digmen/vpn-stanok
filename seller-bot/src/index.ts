@@ -1,6 +1,7 @@
 import { Bot, InlineKeyboard, Keyboard } from 'grammy';
 import { config } from './config.js';
 import { promoEnabled } from './branding.js';
+import { maybePromoNudge, promoLink } from './promo-nudge.js';
 import { markReminded, pendingReminders } from './reminders.js';
 import {
   addPromo,
@@ -366,6 +367,7 @@ async function deliverPurchase(opts: {
   // любому желающему сжечь лимит чужого кода, ничего не заплатив.
   if (opts.promoCode) markPromoUsed(opts.promoCode, userId);
   void awardReferral(bot.api, userId, pkg?.days ?? config.days, opts.charge);
+  await maybePromoNudge(bot.api, userId); // последним: после ключа и подписки, ничего не заслоняет
   return true;
 }
 
@@ -444,6 +446,7 @@ async function giveTrial(ctx: any): Promise<void> {
       .catch(() => {});
   }
   await ctx.reply(`🎁 Пробный доступ на ${humanHours(s.trial.hours)} активен. Приложение — кнопка ниже, вместе с ключом.`);
+  await maybePromoNudge(ctx.api, userId);
 }
 
 bot.callbackQuery('trial', async (ctx) => {
@@ -1062,7 +1065,7 @@ bot.hears('❓ Помощь', (ctx) => sendHelp(ctx));
 
 bot.hears('💰 Заработай на своём VPN так же', async (ctx) => {
   if (!promoEnabled()) return; // white-label: у оплативших промо нет
-  await ctx.reply(`💰 Свой такой же VPN-бот и заработок на нём — здесь:\n${config.stanokUrl}`, {
+  await ctx.reply(`💰 Свой такой же VPN-бот и заработок на нём — здесь:\n${promoLink(config.stanokUrl, getOwnerId())}`, {
     link_preview_options: { is_disabled: true },
   });
 });

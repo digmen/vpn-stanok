@@ -25,6 +25,13 @@ describe('условия владельцев', () => {
     expect(TERMS_FULL).toContain('Доля с продаж');
   });
 
+  it('честно называет ссылку на франшизу в боте: кнопка, разовое сообщение, можно убрать', () => {
+    expect(TERMS_FULL).toContain('Ссылка на франшизу');
+    expect(TERMS_FULL).toContain('один раз приходит сообщение');
+    expect(TERMS_FULL).toContain('Убрать и кнопку, и сообщение можно');
+    expect(TERMS_SHORT).toContain('открытая ссылка на франшизу');
+  });
+
   it('короткая версия говорит, что «Принимаю» = согласие, и ведёт на полный текст', () => {
     expect(TERMS_SHORT).toContain('/terms');
     expect(TERMS_SHORT).toContain('Принимаю');
