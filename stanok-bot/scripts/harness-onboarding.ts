@@ -26,7 +26,11 @@ const { onboarding } = await import('../src/onboarding.js');
 const C = await import('../src/chat-log.js');
 const { db } = await import('../src/db.js');
 
+const { acceptTerms } = await import('../src/terms.js');
+
 const U = 4242;
+// С 22.10 перед мастером показываются условия; этот прогон не про них — принимаем заранее.
+acceptTerms(U);
 let msgId = 100;
 const sent: { method: string; text?: string }[] = [];
 
@@ -85,6 +89,10 @@ check('на вопрос — подсказка про покупку', sent.som
 
 await text(`root@${HOST}:22`);
 check('IP вытащен из «root@…:22», сервер ответил', sent.some((s) => s.text?.includes(`Сервер ${HOST} отвечает`)));
+check('после IP спрашивает протокол (три кнопки)', sent.some((s) => s.text?.startsWith('🔧 Какой протокол')));
+await press('proto:wireguard');
+check('чужой протокол не принимается, мастер ждёт', !lastBot().startsWith('2️⃣ Пришли root-пароль'));
+await press('proto:vless_reality');
 check('дальше спрашивает пароль', lastBot().startsWith('2️⃣ Пришли root-пароль'));
 
 await text('definitely-wrong-password-42');
@@ -99,11 +107,35 @@ check('ответы бота в журнале', log.some((r) => r.dir === 'out'
 const outs = log.filter((r) => r.dir === 'out').map((r) => r.text);
 check('перепроигрывание мастера не задвоило ответы бота', new Set(outs).size === outs.length || outs.length < sent.length);
 const steps = (db.prepare('SELECT step FROM events WHERE tg_user_id = ? ORDER BY id').all(U) as { step: string }[]).map((r) => r.step);
-check('шаги: ip_rejected → ip_ok → preflight_ok → password_wrong', ['ip_rejected', 'ip_ok', 'preflight_ok', 'password_wrong'].every((s) => steps.includes(s)));
-check('шаги не задвоились', steps.filter((s) => s === 'password_wrong').length === 1 && steps.filter((s) => s === 'preflight_ok').length === 1);
+check('шаги: ip_rejected → ip_ok → preflight_ok → protocol_chosen → password_wrong', ['ip_rejected', 'ip_ok', 'preflight_ok', 'protocol_chosen', 'password_wrong'].every((s) => steps.includes(s)));
+check('выбранный протокол записан в журнал', (db.prepare("SELECT detail FROM events WHERE step='protocol_chosen'").get() as { detail: string } | undefined)?.detail === 'vless_reality');
+check('шаги не задвоились', steps.filter((s) => s === 'protocol_chosen').length === 1 && steps.filter((s) => s === 'password_wrong').length === 1 && steps.filter((s) => s === 'preflight_ok').length === 1);
 
 await text('/start');
 check('после /start отметка «секрет» снята', (db.prepare('SELECT COUNT(*) c FROM secret_wait').get() as { c: number }).c === 0);
+
+// ── Сценарий 2 (обращение #14, 07.11): основной сервер больше не принимает сохранённый пароль ──
+// Второй сервер берём чужой, но с открытым 22 (проверка — только TCP-соединение, без входа).
+const OTHER = process.env.HARNESS_OTHER_HOST;
+if (OTHER) {
+  const { upsertNode, setNodeStatus } = await import('../src/db.js');
+  const { encrypt } = await import('../src/crypto.js');
+  const nid = upsertNode({
+    tgUserId: U, tgUsername: 'harness', serverIp: HOST, rootPasswordEnc: encrypt('stale-old-password-1'),
+    sellerTokenEnc: encrypt('1:fake'), isPrimary: true, protocol: 'vless_ws_tls',
+  });
+  setNodeStatus(nid, 'ready');
+  sent.length = 0;
+  await press('setup');
+  await text(OTHER);
+  await press('proto:amneziawg');
+  check('основной не пускает → мастер говорит об ОСНОВНОМ сервере', sent.some((s) => s.text?.includes('основной сервер') && s.text?.includes('больше не принимает')));
+  check('и НЕ просит пароль нового, пока не решено с основным', !sent.some((s) => s.text?.startsWith('2️⃣ Пришли root-пароль')));
+  await press('pw_gone');
+  check('«основного больше нет» → дальше пароль нового', lastBot().startsWith('2️⃣ Пришли root-пароль'));
+  const steps2 = (db.prepare('SELECT step FROM events WHERE tg_user_id = ? ORDER BY id').all(U) as { step: string }[]).map((r) => r.step);
+  check('в журнале: primary_password_bad и primary_gone', steps2.includes('primary_password_bad') && steps2.includes('primary_gone'));
+}
 
 console.log('\nЖурнал диалога:');
 for (const r of C.chatTranscript(U, 500)) console.log(`  ${r.dir === 'in' ? '👤' : '🤖'} ${(r.text ?? '').split('\n')[0].slice(0, 90)}`);

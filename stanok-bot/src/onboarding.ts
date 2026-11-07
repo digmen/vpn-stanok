@@ -2,7 +2,8 @@ import type { Conversation, ConversationFlavor } from '@grammyjs/conversations';
 import { InlineKeyboard, type Context } from 'grammy';
 import { config } from './config.js';
 import { decrypt, encrypt } from './crypto.js';
-import { demoteNode, findNodeByIpOfOtherUser, getAllNodes, getPrimaryNodeAny, getPrimaryReadyNode, setReplacedNodeId, setSellerTokenForUser, upsertNode } from './db.js';
+import { demoteNode, findNodeByIpOfOtherUser, getAllNodes, getLatestFailedSecondary, getPrimaryNodeAny, getPrimaryReadyNode, setNodePassword, setReplacedNodeId, setSellerTokenForUser, upsertNode, type NodeProtocol, type NodeRow } from './db.js';
+import { parseProtocolCallback, protocolKeyboard, protocolLabel, protocolQuestion } from './protocols.js';
 import { notifyAdmins } from './admin.js';
 import { logEvent, type FunnelStep, type SideStep } from './events.js';
 import { checkSshLogin, checkSshPort, preflightMessage } from './preflight.js';
@@ -255,7 +256,80 @@ async function ipThatAnswers(
 // снаружи неотличимо от обычного сайта, потому что это и есть обычный сайт.
 // Узлы, заведённые ДО этого решения, остаются на своём протоколе (nodes.protocol), их
 // никто не переустанавливает — миграция отдельной командой.
-const NEW_NODE_PROTOCOL: 'vless_ws_tls' = 'vless_ws_tls';
+//
+// 07.11: по просьбе автора франшизы выбор протокола вернули (WS+TLS / Reality / AmneziaWG) —
+// см. protocols.ts. WS+TLS остаётся первым и рекомендуемым, остальные — осознанный выбор
+// владельца с честным описанием на кнопке; решение 08.09 про причину не отменено.
+
+async function askProtocol(conversation: MyConversation, ctx: MyContext, track: Track): Promise<NodeProtocol> {
+  const q = await ctx.reply(protocolQuestion(), { reply_markup: protocolKeyboard() });
+  for (;;) {
+    const upd = await conversation.waitForCallbackQuery(/^proto:/);
+    await upd.answerCallbackQuery().catch(() => {});
+    const chosen = parseProtocolCallback(upd.callbackQuery.data);
+    if (!chosen) continue;
+    await del(ctx, q.message_id);
+    await track('protocol_chosen', chosen);
+    return chosen;
+  }
+}
+
+// Спрашивает root-пароль УЖЕ заведённого сервера и сверяет его с самим сервером.
+// Возвращает пароль, который сервер принял (или который не удалось проверить из-за сети —
+// тогда человека не держим, решит установка, как и в основном потоке).
+async function askVerifiedPassword(
+  conversation: MyConversation,
+  ctx: MyContext,
+  host: string,
+  prompt: string,
+): Promise<string> {
+  let p = prompt;
+  for (;;) {
+    const pw = await askStep(conversation, ctx, {
+      video: '',
+      prompt: p,
+      secret: 'password',
+      validate: (s) => (isNonEmptySecret(s) ? null : '❌ Пароль пустой или слишком короткий. Пришли ещё раз:'),
+    });
+    const checking = await ctx.reply('🔐 Проверяю пароль на сервере…');
+    const verdict = await conversation.external(() => checkSshLogin(host, pw));
+    await del(ctx, checking.message_id);
+    if (verdict !== 'bad_password') return pw;
+    p =
+      '❌ Сервер не принял и этот пароль. Нужен root-пароль именно этого сервера: он в письме от ' +
+      'хостинга и в панели, в карточке сервера (там же его можно сбросить).\n\nПришли ещё раз:';
+  }
+}
+
+// 🔴 07.11 (обращение #14): основной сервер владельца перестал пускать станок (переустановка,
+// смена пароля), а станок про это не знал и писал «пришли данные нового сервера» по кругу.
+// Отдельный короткий путь: обновить пароль основного, не трогая остальное.
+export async function updatePrimaryPassword(conversation: MyConversation, ctx: MyContext) {
+  const from = ctx.from!;
+  const track: Track = (step, detail) =>
+    conversation.external(() => logEvent({ id: from.id, username: from.username }, step, detail));
+  const primary = await conversation.external(() => getPrimaryNodeAny(from.id));
+  if (!primary) {
+    await ctx.reply('У тебя ещё нет основного сервера — нажми /start, настроим с нуля.');
+    return;
+  }
+  const pw = await askVerifiedPassword(
+    conversation,
+    ctx,
+    primary.server_ip,
+    `🔑 Пришли актуальный root-пароль основного сервера ${primary.server_ip}.\n` +
+      'Он в панели хостинга, в карточке сервера (там же можно сбросить). ⚠️ Хранится зашифрованно.',
+  );
+  await conversation.external(() => setNodePassword(primary.id, encrypt(pw)));
+  await track('primary_password_updated', `узел #${primary.id}`);
+  const failed: NodeRow | undefined = await conversation.external(() => getLatestFailedSecondary(from.id));
+  const kb = failed ? new InlineKeyboard().text(`🔄 Добавить сервер ${failed.server_ip} снова`, `provision:${failed.id}`) : undefined;
+  await ctx.reply(
+    '✅ Пароль основного сервера обновлён.' +
+      (failed ? '\n\nМожно добавлять сервер заново — вводить ничего не нужно.' : ''),
+    kb ? { reply_markup: kb } : undefined,
+  );
+}
 
 // Диалог онбординга: IP → проверка связи → root-пароль → [токен бота-продавца, только
 // если это ПЕРВЫЙ сервер владельца].
@@ -368,7 +442,43 @@ export async function onboarding(conversation: MyConversation, ctx: MyContext) {
   }
 
   const ip = await ipThatAnswers(conversation, ctx, from.id, track);
-  const protocol = NEW_NODE_PROTOCOL;
+  const protocol = await askProtocol(conversation, ctx, track);
+
+  // 🔴 07.11 (#14): прежде чем просить пароль НОВОГО сервера, убеждаемся, что станок ещё
+  // пускает на ОСНОВНОЙ. Раньше это всплывало только после установки на новый сервер, а
+  // человеку говорили, что виноват новый — и он ходил по кругу.
+  let primaryGone = false;
+  if (primary && primary.server_ip !== ip) {
+    const storedPw = decrypt(primary.root_password_enc);
+    const pv = await conversation.external(() => checkSshLogin(primary.server_ip, storedPw));
+    if (pv === 'bad_password') {
+      await track('primary_password_bad', primary.server_ip);
+      const kbp = new InlineKeyboard()
+        .text('🔑 Пришлю новый пароль основного', 'pw_new')
+        .row()
+        .text('🗑 Основного сервера больше нет', 'pw_gone');
+      await ctx.reply(
+        `⚠️ Твой основной сервер (${primary.server_ip}, где работает бот) больше не принимает сохранённый у меня пароль — ` +
+          'похоже, его сменили или систему там переустановили.\n\nЧто из этого?',
+        { reply_markup: kbp },
+      );
+      const ans = await conversation.waitForCallbackQuery(['pw_new', 'pw_gone']);
+      await ans.answerCallbackQuery().catch(() => {});
+      if (ans.callbackQuery.data === 'pw_gone') {
+        primaryGone = true;
+        await track('primary_gone', primary.server_ip);
+      } else {
+        const fresh = await askVerifiedPassword(
+          conversation,
+          ctx,
+          primary.server_ip,
+          `🔑 Пришли актуальный root-пароль основного сервера ${primary.server_ip}.\n⚠️ Хранится зашифрованно.`,
+        );
+        await conversation.external(() => setNodePassword(primary.id, encrypt(fresh)));
+        await track('primary_password_updated', `узел #${primary.id}`);
+      }
+    }
+  }
 
   // Пароль проверяем на сервере сразу, а не после «Поднять VPN» (см. preflight.ts::checkSshLogin).
   let passwordPrompt =
@@ -475,8 +585,8 @@ export async function onboarding(conversation: MyConversation, ctx: MyContext) {
   // Дальше работает как pesдача primary (is_primary=true), просто с другим IP; старый
   // узел снимаем с primary/ready, чтобы не путался под ногами и не пинговался монитором
   // вечно. Если старый primary НА САМОМ ДЕЛЕ жив — ничего не меняется, обычная вторая точка.
-  let isReplacement = false;
-  if (primaryAny && !isResubmittedPrimary) {
+  let isReplacement = primaryGone;
+  if (primaryAny && !isResubmittedPrimary && !primaryGone) {
     const oldAlive = primary ? (await conversation.external(() => checkSshPort(primaryAny.server_ip))).ok : false;
     if (!oldAlive) isReplacement = true;
   }
@@ -501,7 +611,7 @@ export async function onboarding(conversation: MyConversation, ctx: MyContext) {
     await track('primary_replaced', `${primaryAny.server_ip} → ${ip}`);
   }
 
-  const kb = new InlineKeyboard().text('🚀 Поднять VPN', `provision:${id}`);
+  const kb = new InlineKeyboard().text(`🚀 Поднять VPN (${protocolLabel(protocol)})`, `provision:${id}`);
   await ctx.reply(
     isResubmittedPrimary
       ? `✅ Данные приняты (сервер ${ip}).\nЭто твой основной сервер — переустановлю бота на нём заново. ` +

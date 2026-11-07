@@ -25,7 +25,7 @@ import {
   type OwnerDowntime,
 } from './downtime.js';
 import { acceptedTermsVersion, acceptTerms, TERMS_ACCEPT_CALLBACK, TERMS_FULL, TERMS_VERSION } from './terms.js';
-import { onboarding, updateToken, type MyContext } from './onboarding.js';
+import { onboarding, updatePrimaryPassword, updateToken, type MyContext } from './onboarding.js';
 import { provisionNode } from './provision.js';
 import { notifyAdmins } from './admin.js';
 import { checkNodeAlive } from './ssh.js';
@@ -84,6 +84,7 @@ bot.use(async (ctx, next) => {
 
 bot.use(createConversation(onboarding));
 bot.use(createConversation(updateToken));
+bot.use(createConversation(updatePrimaryPassword));
 
 // ── Шаг 1: купить сервер ────────────────────────────────────────────────
 function startKeyboard(): InlineKeyboard {
@@ -279,7 +280,7 @@ bot.command('status', async (ctx) => {
 });
 
 bot.command('help', async (ctx) => {
-  const base = '/start — начать\n/status — статус твоих серверов\n/token — заменить токен бота-продавца';
+  const base = '/start — начать\n/status — статус твоих серверов\n/token — заменить токен бота-продавца\n/password — обновить пароль основного сервера';
   // Админские команды видит только админ — остальным они не нужны и только путают.
   const admin =
     '\n\n/say <текст> — рассылка владельцам (сначала покажу список получателей)' +
@@ -294,6 +295,16 @@ bot.command('help', async (ctx) => {
 // Смена токена бота-продавца без повторной настройки сервера (см. onboarding.ts::updateToken).
 bot.command('token', async (ctx) => {
   await ctx.conversation.enter('updateToken');
+});
+
+// 07.11: пароль основного сервера сменился/сервер переустановлен — обновить без повторной настройки.
+bot.command('password', async (ctx) => {
+  await ctx.conversation.enter('updatePrimaryPassword');
+});
+bot.callbackQuery('fixprimary', async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (Object.keys(await ctx.conversation.active()).length > 0) await ctx.conversation.exit();
+  await ctx.conversation.enter('updatePrimaryPassword');
 });
 
 // Мониторинг всех узлов (только админ): статус + живая проверка доступности
