@@ -87,6 +87,10 @@ export type SideStep =
   | 'sub_fail'
   | 'sub_unknown'
   // 13.09: написал в бота техподдержки (detail = номер обращения) — см. support/.
+  | 'protocol_chosen'
+  | 'primary_password_bad'
+  | 'primary_password_updated'
+  | 'primary_gone'
   | 'support_msg';
 
 export interface EventRow {

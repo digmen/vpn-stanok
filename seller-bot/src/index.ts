@@ -97,13 +97,25 @@ const bot = new Bot(config.botToken);
 registerDeliveryHandlers(bot);
 
 /**
- * Решение 06.09 (прямое, без вариантов): в кнопке «Установить приложение» —
- * только OneXray. У продукта дальше один протокол — VLESS+Reality, AmneziaWG
- * новым узлам не предлагается вообще. Не гадать по локациям владельца.
+ * Приложения для клиентов — по протоколам, которые РЕАЛЬНО есть у владельца (его локации).
+ * Раньше (решение 06.09) тут была одна OneXray, потому что протокол был один. С 07.11 владелец
+ * сам выбирает протокол при настройке сервера (AmneziaWG ставится своим приложением), и
+ * показывать OneXray тому, у кого стоит AmneziaWG, значит дать клиенту приложение, которое
+ * его ключ не откроет. OneXray одинаково открывает Reality и WS+TLS — это одна строка.
  */
 function appLinksText(): string {
-  const a = APPS.vless_reality;
-  return `📱 ${a.name}:\n• Android: ${a.android}\n• iPhone: ${a.ios}\n\nПоставь приложение заранее — после оплаты пришлю ключ.`;
+  const present = new Set(allLocations().map((l) => l.protocol));
+  const names = new Set<string>();
+  const blocks: string[] = [];
+  for (const proto of ['vless_ws_tls', 'vless_reality', 'amneziawg'] as const) {
+    if (!present.has(proto)) continue;
+    const a = APPS[proto];
+    if (names.has(a.name)) continue;
+    names.add(a.name);
+    blocks.push(`📱 ${a.name}:\n• Android: ${a.android}\n• iPhone: ${a.ios}`);
+  }
+  if (blocks.length === 0) blocks.push(`📱 ${APPS.vless_ws_tls.name}:\n• Android: ${APPS.vless_ws_tls.android}\n• iPhone: ${APPS.vless_ws_tls.ios}`);
+  return blocks.join('\n\n') + '\n\nПоставь приложение заранее — после оплаты пришлю ключ.';
 }
 
 // Владелец вводит значение текстом. Одно ожидание за раз — состояние простое и не переживает

@@ -225,6 +225,24 @@ export function setReplacedNodeId(id: number, replacedNodeId: number): void {
   db.prepare('UPDATE nodes SET replaced_node_id = ? WHERE id = ?').run(replacedNodeId, id);
 }
 
+/** Новый root-пароль уже заведённого узла (владелец переустановил сервер или сменил пароль). */
+export function setNodePassword(id: number, rootPasswordEnc: string): void {
+  db.prepare("UPDATE nodes SET root_password_enc = ?, updated_at = datetime('now') WHERE id = ?").run(
+    rootPasswordEnc,
+    id,
+  );
+}
+
+/** Последняя неудавшаяся ДОПОЛНИТЕЛЬНАЯ точка владельца — чтобы после починки пароля основного
+ *  сервера предложить «добавить снова» одной кнопкой, не заставляя вводить всё заново. */
+export function getLatestFailedSecondary(tgUserId: number): NodeRow | undefined {
+  return db
+    .prepare(
+      "SELECT * FROM nodes WHERE tg_user_id = ? AND is_primary = 0 AND status = 'error' ORDER BY id DESC LIMIT 1",
+    )
+    .get(tgUserId) as NodeRow | undefined;
+}
+
 export function setNodeStatus(id: number, status: string): void {
   db.prepare("UPDATE nodes SET status = ?, updated_at = datetime('now') WHERE id = ?").run(status, id);
 }

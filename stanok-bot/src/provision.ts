@@ -7,7 +7,7 @@ import { getNodeById, getPrimaryReadyNode, setNodeProtocol, setNodeRelay, setNod
 import { runRemoteInstall } from './ssh.js';
 import { testHandshake, testVlessRealityHandshake, testVlessWsTlsHandshake } from './handshake-test.js';
 import { deploySeller, getBotUsername } from './deploy-seller.js';
-import { attachLocationToPrimary } from './attach-location.js';
+import { attachLocationToPrimary, TAG_PRIMARY } from './attach-location.js';
 import { nodeDomain, registerNodeDns } from './dns.js';
 import { restoreBackup } from './backup.js';
 import { TOKEN_INVALID_HELP, verifyBotToken } from './bot-token.js';
@@ -378,12 +378,20 @@ export async function provisionNode(
     // четыре раза подряд (#21, 11.09) говорит ему только «всё сломано», и он уходит.
     // Подробности целиком получаем мы — в тревоге ниже и в сохранённом логе.
     // С неверным паролем кнопка «Попробовать снова» бесполезна — он у нас тот же.
-    const auth = isAuthFailure(msg);
-    const failKb = auth ? new InlineKeyboard() : retryKb;
+    // 🔴 07.11 (#14): отказал ОСНОВНОЙ сервер, а не тот, что человек только что прислал.
+    // Тут нужна не «попробовать снова» и не перевод данных нового сервера, а кнопка обновить
+    // пароль основного — после неё добавление повторяется без повторного ввода.
+    const primaryAuth = msg.includes(TAG_PRIMARY) && isAuthFailure(msg);
+    const auth = isAuthFailure(msg) && !msg.includes(TAG_PRIMARY);
+    const failKb = primaryAuth
+      ? new InlineKeyboard().text('🔑 Обновить пароль основного сервера', 'fixprimary')
+      : auth
+        ? new InlineKeyboard()
+        : retryKb;
     if (config.supportBotToken) failKb.row().url('🆘 Поддержка', config.supportBotUrl + '?start=install');
     await show(
       `❌ Не получилось довести настройку.\n\n${humanInstallError(msg)}` +
-        (auth ? '' : '\n\nЗаново вводить ничего не нужно — только нажать кнопку.'),
+        (auth || primaryAuth || msg.includes(TAG_PRIMARY) ? '' : '\n\nЗаново вводить ничего не нужно — только нажать кнопку.'),
       failKb,
     );
     await notifyAdmins(

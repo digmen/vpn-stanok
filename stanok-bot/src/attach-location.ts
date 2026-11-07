@@ -9,6 +9,19 @@ import type { NodeProtocol } from './db.js';
 
 const execFileP = promisify(execFile);
 
+/**
+ * 🔴 07.11 (обращение #14): станок писал «сервер не принял root-пароль», хотя отказывал не
+ * НОВЫЙ сервер, а ОСНОВНОЙ (у владельца он переустановлен, пароль в базе устарел). Человек
+ * перевводил данные нового сервера по кругу. Теперь каждая ошибка помечена, КАКОЙ из двух
+ * серверов отказал — по метке humanInstallError выбирает, что сказать.
+ */
+export const TAG_NEW = '[новый сервер]';
+export const TAG_PRIMARY = '[основной сервер]';
+
+function tagged(tag: string, e: unknown): Error {
+  return new Error(`${tag} ${e instanceof Error ? e.message : String(e)}`);
+}
+
 function quote(arg: string): string {
   return `'${arg.replace(/'/g, "'\\''")}'`;
 }
@@ -70,14 +83,18 @@ async function installPubKey(ssh: NodeSSH, pub: string): Promise<void> {
 export async function attachLocationToPrimary(opts: AttachLocationOpts): Promise<AttachLocationResult> {
   // 1. Заходим на НОВЫЙ сервер паролем, ставим ОБА публичных ключа.
   const newSsh = new NodeSSH();
-  await newSsh.connect({
-    host: opts.newHost,
-    username: SSH.USERNAME,
-    password: opts.newPassword,
-    port: opts.newPort ?? SSH.PORT,
-    readyTimeout: SSH.READY_TIMEOUT_MS,
-    tryKeyboard: true,
-  });
+  try {
+    await newSsh.connect({
+      host: opts.newHost,
+      username: SSH.USERNAME,
+      password: opts.newPassword,
+      port: opts.newPort ?? SSH.PORT,
+      readyTimeout: SSH.READY_TIMEOUT_MS,
+      tryKeyboard: true,
+    });
+  } catch (e) {
+    throw tagged(TAG_NEW, e);
+  }
   let locationKey: { priv: string; pub: string };
   let supportKey: { priv: string; pub: string };
   try {
@@ -93,15 +110,23 @@ export async function attachLocationToPrimary(opts: AttachLocationOpts): Promise
   //    кладём приватный ключ локации + вызываем CLI-скрипт самого seller-bot,
   //    чтобы формат locations.json/data-папки не дублировать здесь второй раз.
   const primarySsh = new NodeSSH();
-  await primarySsh.connect({
-    host: opts.primaryHost,
-    username: SSH.USERNAME,
-    password: opts.primaryPassword,
-    port: SSH.PORT,
-    readyTimeout: SSH.READY_TIMEOUT_MS,
-    tryKeyboard: true,
-  });
   try {
+    await primarySsh.connect({
+      host: opts.primaryHost,
+      username: SSH.USERNAME,
+      password: opts.primaryPassword,
+      port: SSH.PORT,
+      readyTimeout: SSH.READY_TIMEOUT_MS,
+      tryKeyboard: true,
+    });
+  } catch (e) {
+    throw tagged(TAG_PRIMARY, e);
+  }
+  try {
+    // Сервер пускает, но бота на нём нет (систему переустановили, а пароль остался тот же) —
+    // без этой проверки cli-add-location падал бы невнятным «cannot find module».
+    const has = await primarySsh.execCommand(`test -f ${REMOTE.SELLER_DIR}/scripts/cli-add-location.ts && echo OK || echo NO`);
+    if (!has.stdout.includes('OK')) throw new Error(`${TAG_PRIMARY} бот-продавец на нём не найден`);
     const remoteKeyPath = `/tmp/stanok-loc-${Date.now()}.key`;
     await primarySsh.execCommand(`cat > ${remoteKeyPath} <<'KEYEOF'\n${locationKey.priv}KEYEOF\nchmod 600 ${remoteKeyPath}`);
     const args = [opts.newHost, String(opts.newPort ?? ''), remoteKeyPath, opts.title ?? opts.newHost, opts.protocol]
@@ -110,7 +135,7 @@ export async function attachLocationToPrimary(opts: AttachLocationOpts): Promise
     const res = await primarySsh.execCommand(`cd ${REMOTE.SELLER_DIR} && npx tsx scripts/cli-add-location.ts ${args}`);
     await primarySsh.execCommand(`rm -f ${remoteKeyPath}`).catch(() => {});
     if (res.code !== 0) {
-      throw new Error('не удалось добавить локацию в бота: ' + (res.stderr || res.stdout).slice(0, 300));
+      throw new Error(`${TAG_PRIMARY} не удалось добавить локацию в бота: ` + (res.stderr || res.stdout).slice(0, 300));
     }
     const parsed = JSON.parse(res.stdout.trim().split('\n').pop() ?? '{}') as { id?: string };
     if (!parsed.id) throw new Error('cli-add-location не вернул id: ' + res.stdout.slice(0, 200));
