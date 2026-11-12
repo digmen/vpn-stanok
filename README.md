@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/avatar.jpg" width="140" alt="VPNForge"></p>
+
 # VPN Franchise 🛰️
 
 **English** · [Русский](README.ru.md)
@@ -12,6 +14,7 @@
   <img alt="grammY" src="https://img.shields.io/badge/grammY-bot%20framework-009688">
   <img alt="Tests" src="https://img.shields.io/badge/tests-258%20passing-brightgreen">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-blue">
+  <a href="https://t.me/VPNForge_bot"><img alt="Telegram" src="https://img.shields.io/badge/Telegram-@VPNForge__bot-26A5E4?logo=telegram&logoColor=white"></a>
 </p>
 
 ---
@@ -29,6 +32,10 @@ collapses both into a two-minute Telegram flow:
 
 The operator earns a recurring commission on every referred hosting payment; each node operator keeps
 their Stars revenue. Real product at every level — an affiliate model, not a pyramid.
+
+### 📈 In production
+
+As of 2026-11-12: **148 people** used the factory bot, **28 owners** set up **40 nodes** on their own servers, and their sales bots made **31 sales**. The support bot handled **14 tickets**.
 
 ## Architecture
 

@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/avatar.jpg" width="140" alt="VPNForge"></p>
+
 # VPN Franchise 🛰️
 
 [English](README.md) · **Русский**
@@ -12,6 +14,7 @@
   <img alt="grammY" src="https://img.shields.io/badge/grammY-bot%20framework-009688">
   <img alt="Tests" src="https://img.shields.io/badge/tests-258%20passing-brightgreen">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-blue">
+  <a href="https://t.me/VPNForge_bot"><img alt="Telegram" src="https://img.shields.io/badge/Telegram-@VPNForge__bot-26A5E4?logo=telegram&logoColor=white"></a>
 </p>
 
 ---
@@ -29,6 +32,10 @@
 
 Оператор получает рекуррентную комиссию с каждого реферального платежа за хостинг; владелец узла
 оставляет себе выручку в Stars. На каждом уровне реальный продукт — это аффилиатная модель, а не пирамида.
+
+### 📈 В работе
+
+На 12.11.2026: со станком работали **148 человек**, **28 владельцев** завели **40 узлов** на своих серверах, через их ботов-продавцов прошла **31 продажа**. Бот поддержки разобрал **14 обращений**.
 
 ## Архитектура
 
