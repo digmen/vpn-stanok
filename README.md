@@ -3,14 +3,14 @@
 **English** · [Русский](README.ru.md)
 
 > A Telegram-bot platform that turns anyone into a VPN reseller. A "factory" bot provisions a
-> DPI-resistant **AmneziaWG** VPN **and** a ready-to-run sales bot onto a user's own server — fully
+> DPI-resistant VPN (**VLESS+WS+TLS**, **VLESS+Reality** or **AmneziaWG**, the owner's choice) **and** a ready-to-run sales bot onto a user's own server — fully
 > automatically over SSH — monetized through a hosting referral program and Telegram Stars.
 
 <p>
   <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-5-3178c6">
   <img alt="Node.js" src="https://img.shields.io/badge/Node.js-22-339933">
   <img alt="grammY" src="https://img.shields.io/badge/grammY-bot%20framework-009688">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-Jest%2011%20passing-brightgreen">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-258%20passing-brightgreen">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-blue">
 </p>
 
@@ -56,7 +56,11 @@ Two independently deployable services, each with a single responsibility:
 ## Key features
 
 - **Zero-touch provisioning** — the factory bot installs the VPN and deploys the sales bot over SSH; the node operator never touches a terminal.
-- **AmneziaWG** — obfuscated WireGuard that resists DPI blocking; installed headless, peers managed directly via `awg`.
+- **Three protocols** — VLESS+WS+TLS with the node's own domain and certificate (default for new nodes since 2026-09-08: Reality turned out to be fingerprintable by strict carriers), VLESS+Reality and AmneziaWG. Each has its own installer and a **live handshake check**, not just "the script didn't fail".
+- **Pre-flight checks** — can the server reach Telegram, is it reachable from Russia; unreachable nodes get a multi-hop relay.
+- **Support bot** — @VPNForgeSupport_bot, a separate process on the same database: tickets, admin replies, user context on every ticket.
+- **The sales bot does more than sell** — one subscription link with all of a client's keys, owner-defined plans and trials, promo codes, referrals (30% of the friend's term), renewal reminders, monthly traffic caps, card/SBP payments via Tribute, self-update.
+- **Node lifecycle** — owner-bot downtime alerts, quiet alerting without repeats, nudges for stuck users, owner broadcasts with rollback, revenue collection.
 - **Telegram Stars payments** — native `XTR` invoices, pre-checkout and delivery handled end-to-end.
 - **Encrypted at rest** — node root credentials are stored with **AES-256-GCM**; the key never leaves the server.
 - **Flexible config delivery** — QR, `.conf` file, or text, chosen by the user.
@@ -73,34 +77,16 @@ Telegram Stars · pm2 · Jest
 
 ```
 vpn-franchise/
-├── stanok-bot/                 # Factory bot
-│   ├── src/
-│   │   ├── index.ts            # Entry, handlers, routing
-│   │   ├── onboarding.ts       # Conversation: collect server access (validated)
-│   │   ├── provision.ts        # Orchestrates install + sales-bot deploy
-│   │   ├── ssh.ts              # Remote install over SSH
-│   │   ├── deploy-seller.ts    # Deploys the sales bot to a node server
-│   │   ├── crypto-core.ts      # AES-256-GCM (pure, testable)
-│   │   ├── crypto.ts           # Crypto bound to config
-│   │   ├── db.ts               # SQLite persistence
-│   │   ├── validate.ts         # Input validation
-│   │   ├── config.ts           # Typed environment config
-│   │   ├── constants.ts        # Infra constants (no magic values)
-│   │   ├── admin.ts            # Admin error alerts
-│   │   └── *.test.ts           # Jest unit tests
-│   └── scripts/install-amneziawg.sh
-├── seller-bot/                 # Sales bot (deployed onto node servers)
-│   ├── src/
-│   │   ├── index.ts            # Menu, payments, delivery
-│   │   ├── vpn.ts              # Creates AmneziaWG peers
-│   │   ├── delivery.ts         # Config delivery: QR / file / text
-│   │   ├── stats.ts            # Owner analytics
-│   │   ├── owner.ts            # Owner identification
-│   │   ├── owner-config.ts     # Owner's reusable config
-│   │   └── config.ts · constants.ts · parse.ts
-│   └── scripts/add-amneziawg-peer.sh
-└── deploy-stanok.sh            # One-command deploy of the factory bot
+├── stanok-bot/        # factory bot (src/index.ts) and support bot (src/support/) — one codebase, one DB, two processes
+│   └── scripts/       # protocol installers, end-to-end checks, reports, lab probes
+├── seller-bot/        # sales bot — deployed by the factory onto every node's server
+│   └── scripts/       # issue/revoke keys per protocol, traffic, self-update
+├── docs/CODEMAP.ru.md # code map (Russian): every file and what it is for
+├── .github/workflows/deploy.yml  # tests and factory deployment
+└── deploy-stanok.sh   # manual one-command deployment
 ```
+
+File-by-file description: **[docs/CODEMAP.ru.md](docs/CODEMAP.ru.md)** (Russian).
 
 ## Getting started
 
@@ -147,12 +133,16 @@ Run the factory bot on an always-on server (outside jurisdictions that block Tel
 The script packages the code, installs Node + pm2 on the remote host, runs `npm install`, and starts
 the bot under `pm2` with restart-on-reboot. Re-run it to ship updates.
 
+### Deployment via GitHub
+
+A push to `main` touching `stanok-bot/**`, `seller-bot/**` or the workflow itself runs the tests and, if they pass, **deploys the factory to production and restarts the bot** (and the support bot). Documentation-only changes (root `*.md`, `docs/`) do not trigger a deploy. So code changes go through a branch and a pull request; tests run on PRs without deploying.
+
 ## How provisioning works
 
 The interesting part is `stanok-bot` acting as a remote deployer. On demand it:
 
 1. Connects to the node's server via SSH using decrypted credentials.
-2. Runs a headless AmneziaWG installer and verifies a client config is produced.
+2. Runs the installer for the chosen protocol and verifies with a **live handshake** that the server really accepts VPN.
 3. Uploads the `seller-bot` source (excluding `node_modules`), installs dependencies, writes an
    `.env`, and starts it under `pm2` — all idempotently.
 4. Reports the running bot's link back to the user and alerts admins on any failure.
