@@ -91,6 +91,11 @@ export type SideStep =
   | 'primary_password_bad'
   | 'primary_password_updated'
   | 'primary_gone'
+  // 17.11: выбор на первом экране — «свой VPN для себя» (detail 'personal') или «VPN-бизнес»
+  // (detail 'business'), см. personal.ts. По нему /funnel показывает, сколько выбрало «для себя».
+  | 'mode_chosen'
+  // 17.11: владелец личного VPN нажал «подключить бота-продавца» на уже настроенном сервере.
+  | 'personal_upgrade'
   | 'support_msg';
 
 export interface EventRow {

@@ -161,6 +161,30 @@ export function funnelReport(days = 30, now = Date.now()): string {
   if (asked || subOk || subUnknown) {
     lines.push('', `📢 Канал: просили подписаться ${asked} · подписались ${subOk}` + (subUnknown ? ` · не проверить ${subUnknown}` : ''));
   }
+  // 17.11: выбор сценария на первом экране (personal.ts). Считаем последний выбор человека —
+  // переключался туда-обратно — учитываем, на чём остановился.
+  const modes = db
+    .prepare(
+      `SELECT detail, COUNT(*) c FROM events WHERE id IN (
+         SELECT MAX(id) FROM events WHERE step = 'mode_chosen' AND created_at >= datetime(?, 'unixepoch') GROUP BY tg_user_id
+       ) GROUP BY detail`,
+    )
+    .all(Math.floor(from / 1000)) as { detail: string | null; c: number }[];
+  const modeCount = (m: string) => modes.filter((r) => (r.detail ?? '').startsWith(m)).reduce((a, r) => a + r.c, 0);
+  const personalNodes = (
+    db
+      .prepare(
+        `SELECT COUNT(*) c FROM nodes WHERE mode = 'personal' AND status = 'ready' AND created_at >= datetime(?, 'unixepoch')`,
+      )
+      .get(Math.floor(from / 1000)) as { c: number }
+  ).c;
+  if (modes.length || personalNodes) {
+    lines.push(
+      '',
+      `🔒 Выбрали «свой VPN для себя»: ${modeCount('personal')} · 💰 «VPN-бизнес»: ${modeCount('business')}` +
+        ` · личных VPN поднято: ${personalNodes}`,
+    );
+  }
   const support = sub('support_msg');
   if (support) lines.push(`🆘 Писали в поддержку: ${support}`);
 

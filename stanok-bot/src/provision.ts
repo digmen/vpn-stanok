@@ -18,6 +18,7 @@ import { notifyAdmins } from './admin.js';
 import { checkSshPort, isAuthFailure, preflightMessage } from './preflight.js';
 import { logEvent } from './events.js';
 import { checkTelegramFromServer, TelegramUnreachableError, telegramBlockedMessage } from './tg-reach.js';
+import { PERSONAL_RU_WARNING, personalReadyKeyboard, personalReadyText, sendPersonalKey } from './personal.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -196,7 +197,21 @@ export async function provisionNode(
       }
     }
 
-    if (node.is_primary) {
+    if (node.mode === 'personal') {
+      // 17.11: «свой VPN для себя» — бота нет, ключом служит первый клиент, которого создал
+      // install-скрипт (email "owner"); он же только что прошёл проверку handshake выше.
+      // Релей через Прагу тут не включаем: он настраивается через бота-продавца (relay.ts),
+      // а бота на личном узле нет — только честно предупреждаем (админ уже оповещён выше).
+      setNodeStatus(nodeId, 'ready');
+      void registerNodeDns(nodeId, node.server_ip);
+      logEvent(who, 'provision_ok', `${node.server_ip} · personal`);
+      const supportUrl = config.supportBotToken ? config.supportBotUrl + '?start=personal' : undefined;
+      await show(
+        personalReadyText(node.server_ip, protocol, ruFailed && !ruFailed.ok ? PERSONAL_RU_WARNING : ''),
+        personalReadyKeyboard(protocol, nodeId, supportUrl),
+      );
+      await sendPersonalKey(api, chatId, protocol, firstClientConfig, node.server_ip);
+    } else if (node.is_primary) {
       // 🔴 07.09: разворачивать бота на мёртвый токен нельзя — он не сможет залогиниться в
       // Telegram, упадёт на старте, и pm2 будет поднимать его бесконечно (у Ramazan_LS так
       // набежало 2333 перезапуска и 100% CPU на его же сервере, при этом молча). Проверяем

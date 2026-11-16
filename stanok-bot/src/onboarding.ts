@@ -2,7 +2,7 @@ import type { Conversation, ConversationFlavor } from '@grammyjs/conversations';
 import { InlineKeyboard, type Context } from 'grammy';
 import { config } from './config.js';
 import { decrypt, encrypt } from './crypto.js';
-import { demoteNode, findNodeByIpOfOtherUser, getAllNodes, getLatestFailedSecondary, getPrimaryNodeAny, getPrimaryReadyNode, setNodePassword, setReplacedNodeId, setSellerTokenForUser, upsertNode, type NodeProtocol, type NodeRow } from './db.js';
+import { convertToBusiness, demoteNode, findNodeByIpOfOtherUser, findNodeByUserAndIp, getAllNodes, getNodeById, getLatestFailedSecondary, getPrimaryNodeAny, getPrimaryReadyNode, setNodePassword, setReplacedNodeId, setSellerTokenForUser, upsertNode, type NodeProtocol, type NodeRow } from './db.js';
 import { parseProtocolCallback, protocolKeyboard, protocolLabel, protocolQuestion } from './protocols.js';
 import { notifyAdmins } from './admin.js';
 import { logEvent, type FunnelStep, type SideStep } from './events.js';
@@ -13,6 +13,8 @@ import { acceptTerms, hasAcceptedTerms, TERMS_ACCEPT_CALLBACK, TERMS_SHORT, TERM
 import { updateSellerToken } from './deploy-seller.js';
 import { checkIp, extractIpv4, ipProblemMessage, isNonEmptySecret, isValidBotToken, notIpMessage } from './validate.js';
 import { clearSecretWait, markSecretWait, type SecretKind } from './chat-log.js';
+import { getUserMode, setUserMode, UPGRADE_INTRO } from './personal.js';
+import { kvGet } from './kv.js';
 
 export type MyContext = Context & ConversationFlavor;
 export type MyConversation = Conversation<MyContext>;
@@ -425,6 +427,10 @@ export async function onboarding(conversation: MyConversation, ctx: MyContext) {
   const track: Track = (step, detail) =>
     conversation.external(() => logEvent({ id: from.id, username: from.username }, step, detail));
 
+  // 17.11: «свой VPN для себя» (personal.ts) — тот же путь без условий для владельцев ботов,
+  // без токена @BotFather и без бота-продавца. Режим выбран на первом экране и лежит в kv.
+  const personal = (await conversation.external(() => getUserMode(from.id))) === 'personal';
+
   const primary = await conversation.external(() => getPrimaryReadyNode(from.id));
   // Последний primary этого владельца НЕЗАВИСИМО от статуса — нужен ниже, чтобы
   // отличить «умер, это его замена» от «жив, это вторая точка» без переспросов.
@@ -432,7 +438,9 @@ export async function onboarding(conversation: MyConversation, ctx: MyContext) {
 
   // 22.10: до первого шага человек видит условия и принимает их. Принявший раньше (в рассылке
   // или при прошлой настройке) этого экрана не видит.
-  if (!(await conversation.external(() => hasAcceptedTerms(from.id)))) {
+  // Условия написаны для владельцев ботов (клиенты, реклама франшизы, простой бота) — к личному
+  // VPN они не относятся; их покажем, если человек позже подключит бота (upgradePersonal).
+  if (!personal && !(await conversation.external(() => hasAcceptedTerms(from.id)))) {
     const kb = new InlineKeyboard().text('✅ Принимаю', TERMS_ACCEPT_CALLBACK);
     await ctx.reply(TERMS_SHORT, { reply_markup: kb });
     const upd = await conversation.waitForCallbackQuery(TERMS_ACCEPT_CALLBACK);
@@ -442,13 +450,29 @@ export async function onboarding(conversation: MyConversation, ctx: MyContext) {
   }
 
   const ip = await ipThatAnswers(conversation, ctx, from.id, track);
+
+  // Личный режим на сервере, который у этого же человека уже работает в бизнесе, разжаловал бы
+  // узел бизнеса (upsertNode по паре «человек + IP») — бот или его точка выпали бы из учёта.
+  if (personal) {
+    const same = await conversation.external(() => findNodeByUserAndIp(from.id, ip));
+    // Только РАБОТАЮЩИЙ бизнес-узел: недоделанная попытка бизнеса на этом сервере (передумал
+    // и выбрал «для себя») спокойно становится личным.
+    if (same && same.mode === 'business' && same.status === 'ready') {
+      await ctx.reply(
+        `Сервер ${ip} уже работает в твоём VPN-бизнесе — свой VPN бери прямо в боте: ` +
+          'открой бота → /start → «🆓 Мой VPN».\n\nДля отдельного личного VPN нужен другой сервер.',
+      );
+      return;
+    }
+  }
+
   const protocol = await askProtocol(conversation, ctx, track);
 
   // 🔴 07.11 (#14): прежде чем просить пароль НОВОГО сервера, убеждаемся, что станок ещё
   // пускает на ОСНОВНОЙ. Раньше это всплывало только после установки на новый сервер, а
   // человеку говорили, что виноват новый — и он ходил по кругу.
   let primaryGone = false;
-  if (primary && primary.server_ip !== ip) {
+  if (!personal && primary && primary.server_ip !== ip) {
     const storedPw = decrypt(primary.root_password_enc);
     const pv = await conversation.external(() => checkSshLogin(primary.server_ip, storedPw));
     if (pv === 'bad_password') {
@@ -508,6 +532,29 @@ export async function onboarding(conversation: MyConversation, ctx: MyContext) {
       'Пришли root-пароль ещё раз:';
   }
   await track('password_ok'); // сам пароль в журнал не попадает — только факт
+
+  if (personal) {
+    // Ни токена, ни проверки Telegram с сервера (бота там не будет). Узел не primary: всё, что
+    // обслуживает ботов-продавцов (монитор токенов, бэкапы, рассылки), его не трогает.
+    // seller_token_enc в таблице NOT NULL — кладём зашифрованную пустую строку.
+    const pid = await conversation.external(() =>
+      upsertNode({
+        tgUserId: from.id,
+        tgUsername: from.username,
+        serverIp: ip,
+        rootPasswordEnc: encrypt(rootPassword),
+        sellerTokenEnc: encrypt(''),
+        isPrimary: false,
+        protocol,
+        mode: 'personal',
+      }),
+    );
+    await ctx.reply(
+      `✅ Данные приняты (сервер ${ip}).\nЖми «Поднять VPN» — я всё настрою сам и через пару минут пришлю твой ключ.`,
+      { reply_markup: new InlineKeyboard().text(`🚀 Поднять VPN (${protocolLabel(protocol)})`, `provision:${pid}`) },
+    );
+    return;
+  }
 
   // 🔴 22.10: бот-продавец живёт на этом сервере и работает через Telegram. Если хостер режет
   // Telegram (случай узла #36), бот запустится и будет молчать, а станок скажет «Готово».
@@ -626,4 +673,69 @@ export async function onboarding(conversation: MyConversation, ctx: MyContext) {
           : `✅ Данные приняты (сервер ${ip}).\nЖми «Поднять VPN» — я всё настрою сам.`,
     { reply_markup: kb },
   );
+}
+
+// 17.11: «Зарабатывать на этом сервере» — личный VPN владельца становится бизнесом: на тот же
+// сервер ставим бота-продавца. Спрашиваем только то, чего не хватает: согласие с условиями для
+// владельцев ботов и токен. IP и пароль уже есть, VPN не переустанавливается (install-скрипты
+// идемпотентны и отдают тот же первый ключ — личный ключ владельца продолжает работать).
+// Номер узла кладёт обработчик кнопки в kv (`upgrade:<id человека>`): conversations v1 не
+// передаёт аргументы в enter().
+export async function upgradePersonal(conversation: MyConversation, ctx: MyContext) {
+  const from = ctx.from!;
+  const track: Track = (step, detail) =>
+    conversation.external(() => logEvent({ id: from.id, username: from.username }, step, detail));
+
+  const nodeId = Number(await conversation.external(() => kvGet(`upgrade:${from.id}`)));
+  const node: NodeRow | undefined = await conversation.external(() => getNodeById(nodeId));
+  if (!node || node.tg_user_id !== from.id || node.mode !== 'personal') {
+    await ctx.reply('Не нашёл твой личный сервер. Нажми /start — настроим с нуля.');
+    return;
+  }
+  // Бот у человека уже есть — второй бот на тот же аккаунт не ставим (409, см. фикс 25.08):
+  // этот сервер можно добавить в существующего бота точкой через обычный путь.
+  const primaryAny = await conversation.external(() => getPrimaryNodeAny(from.id));
+  if (primaryAny) {
+    await ctx.reply(
+      'У тебя уже есть бот-продавец — второй ставить не нужно. Этот сервер можно добавить в него ' +
+        'ещё одной точкой: /start → «💰 VPN-бизнес» → «Я уже купил сервер» и пришли этот же IP.',
+    );
+    return;
+  }
+  await track('personal_upgrade', `узел #${node.id}`);
+  await ctx.reply(UPGRADE_INTRO);
+
+  if (!(await conversation.external(() => hasAcceptedTerms(from.id)))) {
+    const kb = new InlineKeyboard().text('✅ Принимаю', TERMS_ACCEPT_CALLBACK);
+    await ctx.reply(TERMS_SHORT, { reply_markup: kb });
+    const upd = await conversation.waitForCallbackQuery(TERMS_ACCEPT_CALLBACK);
+    await upd.answerCallbackQuery().catch(() => {});
+    await conversation.external(() => acceptTerms(from.id));
+    await track('terms_accepted', TERMS_VERSION);
+  }
+
+  // Бот живёт на этом сервере и ходит в Telegram — если хостер его режет, узнаём до токена.
+  const pw = decrypt(node.root_password_enc);
+  const tg = await conversation.external(() => checkTelegramFromServer(node.server_ip, pw));
+  if (tg === 'blocked') {
+    await track('telegram_blocked', `${node.server_ip} · перед подключением бота к личному VPN`);
+    await ctx.reply(telegramBlockedMessage(node.server_ip));
+    return;
+  }
+
+  const token = await askWorkingToken(
+    conversation,
+    ctx,
+    track,
+    from.id,
+    '🔑 Пришли токен твоего бота-продавца.\n' + 'Создай бота: @BotFather → /newbot → скопируй строку вида 123456:AA...',
+  );
+  await conversation.external(() => {
+    convertToBusiness(node.id, encrypt(token));
+    setUserMode(from.id, 'business');
+  });
+  await track('mode_chosen', 'business · из личного');
+  await ctx.reply('✅ Токен принят. Жми «Поднять бота» — поставлю его на этот же сервер, личный ключ не изменится.', {
+    reply_markup: new InlineKeyboard().text('🚀 Поднять бота', `provision:${node.id}`),
+  });
 }

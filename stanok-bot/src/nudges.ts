@@ -1,10 +1,11 @@
 import { InlineKeyboard, type Api } from 'grammy';
 import { config } from './config.js';
-import { db, getNodesByUser, getReadyPrimaryNodes } from './db.js';
+import { db, getNodesByUser, getReadyPersonalNodes, getReadyPrimaryNodes } from './db.js';
 import { logEvent } from './events.js';
 import { kvInit } from './kv.js';
 import { loadUserStates, toMs, type UserState } from './analytics.js';
 import { buyGuideText, renewReminderText } from './host-guide.js';
+import { getUserMode, personalRenewText } from './personal.js';
 
 // Напоминания тем, кто застрял на полпути.
 //
@@ -66,7 +67,7 @@ function nudgeMessage(kind: NudgeKind, userId: number): { text: string; kb: Inli
   switch (kind) {
     case 'n_buy':
       return {
-        text: 'Привет! Ты заходил настроить свой VPN, но до сервера не дошёл. Вот всё по шагам 👇\n\n' + buyGuideText(),
+        text: 'Привет! Ты заходил настроить свой VPN, но до сервера не дошёл. Вот всё по шагам 👇\n\n' + buyGuideText(getUserMode(userId)),
         kb: offBtn(new InlineKeyboard().url('🌐 Открыть хостинг', config.referralLink).row().text('✅ Я купил сервер', 'bought')),
       };
     case 'n_ip':
@@ -129,7 +130,9 @@ export async function runNudges(api: Api, now = Date.now()): Promise<void> {
 
   // Продление: сервер с бесплатной недели умирает на 8-й день вместе с узлом и его клиентами.
   // Узел никто не предупреждал — и первые узлы так и пропали на шестой-седьмой день.
-  for (const n of getReadyPrimaryNodes()) {
+  // 17.11: личные узлы («свой VPN для себя») — тем же правилом, своим текстом: у них нет бота
+  // и клиентов, но сервер умирает так же. Удержание сервера и есть смысл личного сценария.
+  for (const n of [...getReadyPrimaryNodes(), ...getReadyPersonalNodes()]) {
     const created = toMs(n.created_at);
     const age = now - created;
     if (created < since || age < 6 * 24 * H || age > 8 * 24 * H) continue;
@@ -143,7 +146,7 @@ export async function runNudges(api: Api, now = Date.now()): Promise<void> {
       n.tg_user_id,
       n.tg_username,
       tag,
-      renewReminderText(),
+      n.mode === 'personal' ? personalRenewText() : renewReminderText(),
       new InlineKeyboard().url('🌐 Открыть хостинг', config.referralLink),
     );
   }

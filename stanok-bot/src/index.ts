@@ -25,7 +25,18 @@ import {
   type OwnerDowntime,
 } from './downtime.js';
 import { acceptedTermsVersion, acceptTerms, TERMS_ACCEPT_CALLBACK, TERMS_FULL, TERMS_VERSION } from './terms.js';
-import { onboarding, updatePrimaryPassword, updateToken, type MyContext } from './onboarding.js';
+import { onboarding, updatePrimaryPassword, updateToken, upgradePersonal, type MyContext } from './onboarding.js';
+import {
+  getUserMode,
+  modeKeyboard,
+  modeText,
+  parseModeCallback,
+  setUserMode,
+  START_TEXT,
+  startKeyboard as startKeyboardFor,
+  step2Text,
+  UPGRADE_CALLBACK_PREFIX,
+} from './personal.js';
 import { provisionNode } from './provision.js';
 import { notifyAdmins } from './admin.js';
 import { checkNodeAlive } from './ssh.js';
@@ -85,30 +96,16 @@ bot.use(async (ctx, next) => {
 bot.use(createConversation(onboarding));
 bot.use(createConversation(updateToken));
 bot.use(createConversation(updatePrimaryPassword));
+bot.use(createConversation(upgradePersonal));
 
-// ── Шаг 1: купить сервер ────────────────────────────────────────────────
+// ── Шаг 1: выбрать сценарий и купить сервер ─────────────────────────────
+// 17.11: первый экран — выбор «🔒 Свой VPN для себя» (главная кнопка) или «💰 VPN-бизнес».
+// Тексты и логика режима — personal.ts.
+const supportStartUrl = (): string | undefined =>
+  config.supportBotToken ? config.supportBotUrl + '?start=stanok' : undefined;
 function startKeyboard(): InlineKeyboard {
-  const kb = new InlineKeyboard()
-    .text('🛒 Как купить сервер', 'buy')
-    .row()
-    .text('✅ Я уже купил сервер', 'bought');
-  if (config.supportBotToken) kb.row().url('🆘 Поддержка', config.supportBotUrl + '?start=stanok');
-  return kb;
+  return startKeyboardFor(supportStartUrl());
 }
-
-const START_TEXT =
-  'Привет! 👋\n\n' +
-  'Здесь ты за пару минут получишь свой VPN-сервер и бота, через которого сможешь ' +
-  'продавать VPN за ⭐️ Telegram Stars.\n\n' +
-  '━━━━━━━━━━━━━━\n' +
-  'Всего три шага:\n' +
-  '1. Купить сервер у хостинга — «Как купить сервер», там всё по шагам. Первые 7 дней можно бесплатно.\n' +
-  '2. Прислать мне IP и пароль сервера и токен бота — к каждому покажу, где взять.\n' +
-  '3. Нажать «Поднять VPN» — дальше я всё сделаю сам.\n\n' +
-  '⚠️ При покупке обязательно отметь «Выделенный IP» (~50–65 ₽). Без него сервер спрятан ' +
-  'за NAT хостинга — ни я не смогу его настроить, ни клиенты не подключатся. ' +
-  'Это причина 9 из 10 неудач.\n\n' +
-  'Сервер уже есть — жми «Я уже купил сервер».';
 
 // Вход через подписку на канал (см. channel.ts). true — можно дальше. Иначе показали просьбу
 // подписаться с кнопкой «Я подписался», которая вернёт человека ровно туда, куда он шёл (next).
@@ -173,6 +170,16 @@ bot.command('start', async (ctx) => {
   await ctx.reply(START_TEXT, { reply_markup: startKeyboard() });
 });
 
+// Выбор сценария на первом экране (и переключение «мне нужен другой» на экране сценария).
+bot.callbackQuery(/^mode:/, async (ctx) => {
+  const mode = parseModeCallback(ctx.callbackQuery.data);
+  await ctx.answerCallbackQuery().catch(() => {});
+  if (!mode) return;
+  setUserMode(ctx.from.id, mode);
+  logEvent(ctx.from, 'mode_chosen', mode);
+  await ctx.editMessageText(modeText(mode), { reply_markup: modeKeyboard(mode, supportStartUrl()) }).catch(() => {});
+});
+
 bot.callbackQuery(/^subcheck:(start|bought|setup)$/, async (ctx) => {
   const next = ctx.match[1] as 'start' | 'bought' | 'setup';
   const st = await checkSubscribed(ctx.api, ctx.from.id);
@@ -203,7 +210,7 @@ async function showBuyGuide(ctx: MyContext): Promise<void> {
       /* file_id недоступен */
     }
   }
-  await ctx.reply(buyGuideText(), {
+  await ctx.reply(buyGuideText(ctx.from ? getUserMode(ctx.from.id) : 'business'), {
     reply_markup: new InlineKeyboard()
       .url('🌐 Открыть хостинг', config.referralLink)
       .row()
@@ -223,18 +230,9 @@ bot.callbackQuery('nudge_off', async (ctx) => {
 // ── Шаг 2: настроить ────────────────────────────────────────────────────
 async function showStep2(ctx: MyContext): Promise<void> {
   const kb = new InlineKeyboard().text('⚙️ Настроить', 'setup');
-  // Морфим то же сообщение в Шаг 2 — чат не засоряется
-  await ctx.editMessageText(
-    '📍 Шаг 2. Настройка сервера\n\n' +
-      'Сейчас я попрошу дать доступ к серверу, чтобы настроить его в автоматическом режиме.\n\n' +
-      'Мне нужны:\n' +
-      '1. IP — сразу проверю, отвечает ли сервер\n' +
-      '2. Пароль (спрошу, только если сервер отозвался)\n' +
-      '3. Токен бота — его можно получить, создав бота через @BotFather\n\n' +
-      'К каждому шагу буду давать инструкцию.\n\n' +
-      'Жми «Настроить».',
-    { reply_markup: kb },
-  );
+  // Морфим то же сообщение в Шаг 2 — чат не засоряется. Текст зависит от сценария:
+  // «для себя» токен бота не спрашиваем (personal.ts).
+  await ctx.editMessageText(step2Text(ctx.from ? getUserMode(ctx.from.id) : 'business'), { reply_markup: kb });
 }
 
 async function enterSetup(ctx: MyContext): Promise<void> {
@@ -259,6 +257,15 @@ bot.callbackQuery('setup', async (ctx) => {
   await enterSetup(ctx);
 });
 
+// «Зарабатывать на этом сервере» под готовым личным VPN — подключить бота-продавца на тот же
+// сервер (onboarding.ts::upgradePersonal). Номер узла передаём через kv: enter() без аргументов.
+bot.callbackQuery(new RegExp('^' + UPGRADE_CALLBACK_PREFIX + '(\\d+)$'), async (ctx) => {
+  await ctx.answerCallbackQuery();
+  kvSet(`upgrade:${ctx.from.id}`, ctx.match[1]);
+  if (Object.keys(await ctx.conversation.active()).length > 0) await ctx.conversation.exit();
+  await ctx.conversation.enter('upgradePersonal');
+});
+
 // ── Провижининг: поднять VPN ────────────────────────────────────────────
 bot.callbackQuery(/^provision:(\d+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
@@ -275,7 +282,9 @@ bot.command('status', async (ctx) => {
     await ctx.reply('Заявок пока нет. Нажми /start и настрой сервер.');
     return;
   }
-  const lines = nodes.map((n) => `#${n.id} · ${n.server_ip} · ${n.status}`).join('\n');
+  const lines = nodes
+    .map((n) => `#${n.id} · ${n.server_ip} · ${n.status}${n.mode === 'personal' ? ' · 🔒 личный VPN' : ''}`)
+    .join('\n');
   await ctx.reply('Твои серверы:\n' + lines);
 });
 
