@@ -53,6 +53,11 @@ for (const sql of [
   // через общую команду рассылки человек тут же получил лишнее сообщение. Теперь это
   // данные, а не память.
   `ALTER TABLE nodes ADD COLUMN no_broadcast INTEGER NOT NULL DEFAULT 0`,
+  // 17.11: режим узла. 'business' — как было всегда: VPN + бот-продавец (все узлы до этой
+  // миграции такие, отсюда DEFAULT). 'personal' — «свой VPN для себя»: только VPN, без бота,
+  // ключ владелец получает прямо от станка. Такие узлы всегда is_primary = 0, поэтому всё,
+  // что завязано на бота-продавца (монитор токенов, бэкапы, рассылки, push-seller), их не видит.
+  `ALTER TABLE nodes ADD COLUMN mode TEXT NOT NULL DEFAULT 'business'`,
 ]) {
   try {
     db.exec(sql);
@@ -62,6 +67,8 @@ for (const sql of [
 }
 
 export type NodeProtocol = 'amneziawg' | 'vless_reality' | 'vless_ws_tls';
+/** 'personal' — свой VPN без бота-продавца; 'business' — VPN + бот-продавец (см. миграцию 17.11). */
+export type NodeMode = 'personal' | 'business';
 
 export interface NodeRow {
   id: number;
@@ -97,6 +104,7 @@ export interface NodeRow {
   replaced_node_id: number | null;
   /** 1 — узел исключён из рассылок владельцам (см. миграцию выше). */
   no_broadcast: number;
+  mode: NodeMode;
   created_at: string;
   updated_at: string;
 }
@@ -109,11 +117,12 @@ export function insertNode(n: {
   sellerTokenEnc: string;
   isPrimary: boolean;
   protocol: NodeProtocol;
+  mode?: NodeMode;
 }): number {
   const info = db
     .prepare(
-      `INSERT INTO nodes (tg_user_id, tg_username, server_ip, root_password_enc, seller_token_enc, is_primary, protocol)
-       VALUES (@tgUserId, @tgUsername, @serverIp, @rootPasswordEnc, @sellerTokenEnc, @isPrimary, @protocol)`,
+      `INSERT INTO nodes (tg_user_id, tg_username, server_ip, root_password_enc, seller_token_enc, is_primary, protocol, mode)
+       VALUES (@tgUserId, @tgUsername, @serverIp, @rootPasswordEnc, @sellerTokenEnc, @isPrimary, @protocol, @mode)`,
     )
     .run({
       tgUserId: n.tgUserId,
@@ -123,6 +132,7 @@ export function insertNode(n: {
       sellerTokenEnc: n.sellerTokenEnc,
       isPrimary: n.isPrimary ? 1 : 0,
       protocol: n.protocol,
+      mode: n.mode ?? 'business',
     });
   return Number(info.lastInsertRowid);
 }
@@ -153,6 +163,7 @@ export function upsertNode(n: {
   sellerTokenEnc: string;
   isPrimary: boolean;
   protocol: NodeProtocol;
+  mode?: NodeMode;
 }): number {
   const existing = findNodeByUserAndIp(n.tgUserId, n.serverIp);
   if (!existing) return insertNode(n);
@@ -161,7 +172,7 @@ export function upsertNode(n: {
     `UPDATE nodes
         SET tg_username = @tgUsername, root_password_enc = @rootPasswordEnc,
             seller_token_enc = @sellerTokenEnc, is_primary = @isPrimary, protocol = @protocol,
-            status = 'pending_provision', updated_at = datetime('now')
+            mode = @mode, status = 'pending_provision', updated_at = datetime('now')
       WHERE id = @id`,
   ).run({
     id: existing.id,
@@ -170,6 +181,7 @@ export function upsertNode(n: {
     sellerTokenEnc: n.sellerTokenEnc,
     isPrimary: n.isPrimary ? 1 : 0,
     protocol: n.protocol,
+    mode: n.mode ?? 'business',
   });
   return existing.id;
 }
@@ -238,7 +250,7 @@ export function setNodePassword(id: number, rootPasswordEnc: string): void {
 export function getLatestFailedSecondary(tgUserId: number): NodeRow | undefined {
   return db
     .prepare(
-      "SELECT * FROM nodes WHERE tg_user_id = ? AND is_primary = 0 AND status = 'error' ORDER BY id DESC LIMIT 1",
+      "SELECT * FROM nodes WHERE tg_user_id = ? AND is_primary = 0 AND mode = 'business' AND status = 'error' ORDER BY id DESC LIMIT 1",
     )
     .get(tgUserId) as NodeRow | undefined;
 }
@@ -252,7 +264,8 @@ export function setNodeStatus(id: number, status: string): void {
 // осталась бы с мёртвым и всплыла бы при следующей замене сервера.
 // 🔴 07.09: заведено после инцидента с отозванным токеном (см. bot-token.ts).
 export function setSellerTokenForUser(tgUserId: number, sellerTokenEnc: string): void {
-  db.prepare("UPDATE nodes SET seller_token_enc = ?, updated_at = datetime('now') WHERE tg_user_id = ?").run(
+  // Личные узлы (mode = 'personal') без бота — им токен не нужен, их не трогаем.
+  db.prepare("UPDATE nodes SET seller_token_enc = ?, updated_at = datetime('now') WHERE tg_user_id = ? AND mode = 'business'").run(
     sellerTokenEnc,
     tgUserId,
   );
@@ -315,4 +328,22 @@ export function setNodeRelay(id: number, host: string, port: number): void {
  *  его не вернёт). Тот же приём, что уже применялся вручную 30.08 для узла #11. */
 export function markNodeLost(id: number): void {
   db.prepare("UPDATE nodes SET status = 'lost', updated_at = datetime('now') WHERE id = ?").run(id);
+}
+
+/** Живые личные узлы («свой VPN для себя», без бота) — им напоминаем про продление сервера. */
+export function getReadyPersonalNodes(): NodeRow[] {
+  return db
+    .prepare("SELECT * FROM nodes WHERE status = 'ready' AND mode = 'personal' ORDER BY id")
+    .all() as NodeRow[];
+}
+
+/** Личный узел становится основным узлом бизнеса: появляется токен бота, узел — primary.
+ *  Статус сбрасывается в 'pending_provision': бота ещё надо поставить (provision.ts). VPN на
+ *  сервере при этом не переустанавливается с нуля — install-скрипты идемпотентны и отдают
+ *  тот же первый ключ, так что личный ключ владельца продолжает работать. */
+export function convertToBusiness(id: number, sellerTokenEnc: string): void {
+  db.prepare(
+    `UPDATE nodes SET mode = 'business', is_primary = 1, seller_token_enc = ?, status = 'pending_provision',
+            updated_at = datetime('now') WHERE id = ?`,
+  ).run(sellerTokenEnc, id);
 }
